@@ -13,25 +13,48 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 class GmailClient:
     def __init__(self, credentials_path: str, token_path: str) -> None:
-        self.credentials_path = credentials_path
-        self.token_path = token_path
+        self.credentials_path = Path(credentials_path)
+        self.token_path = Path(token_path)
         self.service = self._build_service()
 
     def _build_service(self):
         creds = None
-        token_file = Path(self.token_path)
 
-        if token_file.exists():
-            creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
+        if self.token_path.exists():
+            creds = Credentials.from_authorized_user_file(
+                str(self.token_path),
+                SCOPES,
+            )
 
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, SCOPES)
-                creds = flow.run_local_server(port=0)
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(self.credentials_path),
+                    SCOPES,
+                )
 
-            token_file.write_text(creds.to_json(), encoding="utf-8")
+                flow.redirect_uri = "http://localhost"
+
+                auth_url, _ = flow.authorization_url(
+                    access_type="offline",
+                    prompt="consent",
+                    include_granted_scopes="true",
+                )
+
+                print("\nOpen this URL in your browser:\n")
+                print(auth_url)
+                print(
+                    "\nAfter approving access, copy the FULL redirected URL "
+                    "from your browser address bar and paste it here.\n"
+                )
+
+                redirected_url = input("Paste redirected URL here: ").strip()
+                flow.fetch_token(authorization_response=redirected_url)
+                creds = flow.credentials
+
+            self.token_path.write_text(creds.to_json(), encoding="utf-8")
 
         return build("gmail", "v1", credentials=creds)
 
