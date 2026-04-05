@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -51,6 +52,10 @@ class GmailClient:
                 )
 
                 redirected_url = input("Paste redirected URL here: ").strip()
+
+                import os
+                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
                 flow.fetch_token(authorization_response=redirected_url)
                 creds = flow.credentials
 
