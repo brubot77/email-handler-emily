@@ -9,12 +9,19 @@ def choose_destination(filename, subject, monthly_dir, deal_dir, unmatched_dir):
     filename_lower = filename.lower()
     subject_lower = subject.lower()
 
+    monthly_tags = ["blu1", "blu2"]
+
     # Monthly Analyzer routing
-    if filename_lower.endswith(".pdf") and "monthly statement" in subject_lower and any(tag in lower for tag in ["blu1", "blu2"]):
+    if (
+        ("monthly statement" in subject_lower and filename_lower.endswith(".pdf"))
+        and any(tag in filename_lower for tag in monthly_tags))
+    ):
         return Path(monthly_dir)
 
     # Deal Analyzer routing
-    if filename_lower.endswith((".csv", ".xlsx", ".xls")) and "mls" in subject_lower:
+    if (
+        ("mls" in subject_lower and filename_lower.endswith((".csv", ".xlsx", ".xls")))
+    ):
         return Path(deal_dir)
 
     # Otherwise unmatched
