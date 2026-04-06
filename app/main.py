@@ -30,8 +30,11 @@ def main() -> None:
     gmail.create_label_if_missing(settings.failed_label)
     gmail.create_label_if_missing(settings.needs_review_label)
 
+    print(f"Found {len(message_ids)} matching message(s)")
+
     for message_id in message_ids:
         if message_id in processed_ids:
+            print(f"{message_id}: already processed, skipping")
             continue
 
         message = gmail.get_message(message_id)
@@ -43,14 +46,18 @@ def main() -> None:
             settings.unmatched_dir,
         )
 
-        print(f"{message_id}: would save {len(saved_paths)} attachment(s)")
+        print(f"{message_id}: found {len(saved_paths)} saveable attachment(s)")
         for path in saved_paths:
             print(f"  - {path}")
 
-        if args.process:
+        if args.process and saved_paths:
             processed_ids.add(message_id)
             state.save(processed_ids)
             gmail.mark_processed_and_archive(message_id, processed_label_id)
+            print(f"{message_id}: processed and archived")
+
+        elif args.process and not saved_paths:
+            print(f"{message_id}: no saveable attachments, not archiving")
 
 
 if __name__ == "__main__":

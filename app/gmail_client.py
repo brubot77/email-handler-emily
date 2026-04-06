@@ -53,9 +53,7 @@ class GmailClient:
 
                 redirected_url = input("Paste redirected URL here: ").strip()
 
-                import os
                 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
                 flow.fetch_token(authorization_response=redirected_url)
                 creds = flow.credentials
 

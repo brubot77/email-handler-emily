@@ -6,14 +6,16 @@ from app.router import choose_destination
 
 
 def extract_parts(payload: dict) -> list[dict]:
-    parts = []
-    stack = [payload]
-    while stack:
-        item = stack.pop()
-        if item.get("parts"):
-            stack.extend(item["parts"])
-        else:
-            parts.append(item)
+    parts: list[dict] = []
+
+    def walk(part: dict) -> None:
+        parts.append(part)
+        for child in part.get("parts", []) or []:
+            walk(child)
+
+    if payload:
+        walk(payload)
+
     return parts
 
 
