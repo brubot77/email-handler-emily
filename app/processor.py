@@ -36,7 +36,12 @@ def save_attachments(message: dict, gmail_client, monthly_dir: str, deal_dir: st
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         data = gmail_client.get_attachment_bytes(message["id"], attachment_id)
-        dest_path = dest_dir / filename
+        clean_name = filename
+        if clean_name.lower().endswith(".pdf.pdf"):
+            clean_name = clean_name[:-4]
+
+        dest_path = dest_dir / clean_name
+        
         dest_path.write_bytes(data)
         saved_paths.append(str(dest_path))
 
