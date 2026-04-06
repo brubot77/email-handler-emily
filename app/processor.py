@@ -32,7 +32,21 @@ def save_attachments(message: dict, gmail_client, monthly_dir: str, deal_dir: st
         if not filename or not attachment_id:
             continue
 
-        dest_dir = choose_destination(filename, monthly_dir, deal_dir, unmatched_dir)
+        subject = ""
+
+        for header in message.get("payload", {}).get("headers", []):
+            if header.get("name") == "Subject":
+                subject = header.get("value", "")
+                break
+
+        dest_dir = choose_destination(
+            filename,
+            subject,
+            monthly_dir,
+            deal_dir,
+            unmatched_dir,
+        )
+        
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         data = gmail_client.get_attachment_bytes(message["id"], attachment_id)
