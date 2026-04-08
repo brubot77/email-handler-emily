@@ -32,6 +32,59 @@ def trigger_deal_analyzer() -> None:
     subprocess.run(["bash", "-lc", cmd], check=False)
 
 
+def get_subject(message: dict) -> str:
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        if header.get("name", "").lower() == "subject":
+            return header.get("value", "")
+    return ""
+
+
+def find_latest_historian(output_dir: str, code: str) -> str | None:
+    output_path = Path(output_dir)
+    patterns = [
+        f"*{code}*historian*.xlsx",
+        f"*{code}*.xlsx",
+    ]
+
+    matches: list[Path] = []
+    for pattern in patterns:
+        matches.extend(output_path.glob(pattern))
+
+    filtered = [p for p in matches if p.is_file()]
+    if not filtered:
+        return None
+
+    filtered.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(filtered[0])
+
+
+def handle_retrieval_request(message: dict, gmail: GmailClient, settings, processed_label_id: str, failed_label_id: str) -> bool:
+    subject = get_subject(message).strip().lower()
+    message_id = message["id"]
+
+    if subject != "retrieve blu1 historian":
+        return False
+
+    historian_path = find_latest_historian(settings.monthly_output_dir, "BLU1")
+    if historian_path is None:
+        historian_path = find_latest_historian(settings.monthly_output_dir, "BRU1")
+
+    if historian_path is None:
+        gmail.mark_failed(message_id, failed_label_id)
+        print(f"{message_id}: retrieval request found, but no BLU1/BRU1 historian file exists")
+        return True
+
+    gmail.reply_with_attachment(
+        original_message=message,
+        attachment_path=historian_path,
+        body_text="Attached is the latest BLU1 historian file from the VPS.",
+    )
+    gmail.mark_processed_and_archive(message_id, processed_label_id)
+    print(f"{message_id}: replied with historian attachment and archived request")
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
@@ -40,6 +93,7 @@ def main() -> None:
 
     settings = load_settings()
     Path(settings.monthly_input_dir).mkdir(parents=True, exist_ok=True)
+    Path(settings.monthly_output_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.deal_input_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.unmatched_dir).mkdir(parents=True, exist_ok=True)
 
@@ -50,7 +104,7 @@ def main() -> None:
     message_ids = gmail.list_message_ids(settings.gmail_query)
 
     processed_label_id = gmail.create_label_if_missing(settings.processed_label)
-    gmail.create_label_if_missing(settings.failed_label)
+    failed_label_id = gmail.create_label_if_missing(settings.failed_label)
     gmail.create_label_if_missing(settings.needs_review_label)
 
     print(f"Found {len(message_ids)} matching message(s)")
@@ -64,6 +118,20 @@ def main() -> None:
             continue
 
         message = gmail.get_message(message_id)
+
+        if args.process:
+            handled = handle_retrieval_request(
+                message,
+                gmail,
+                settings,
+                processed_label_id,
+                failed_label_id,
+            )
+            if handled:
+                processed_ids.add(message_id)
+                state.save(processed_ids)
+                continue
+
         saved_paths = save_attachments(
             message,
             gmail,

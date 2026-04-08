@@ -10,6 +10,7 @@ class Settings:
     gmail_credentials_path: str
     gmail_token_path: str
     monthly_input_dir: str
+    monthly_output_dir: str
     deal_input_dir: str
     unmatched_dir: str
     state_file: str
@@ -26,6 +27,7 @@ def load_settings() -> Settings:
         gmail_credentials_path=os.environ["GMAIL_CREDENTIALS_PATH"],
         gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
         monthly_input_dir=os.environ["MONTHLY_INPUT_DIR"],
+        monthly_output_dir=os.environ["MONTHLY_OUTPUT_DIR"],
         deal_input_dir=os.environ["DEAL_INPUT_DIR"],
         unmatched_dir=os.environ["UNMATCHED_DIR"],
         state_file=os.environ["STATE_FILE"],

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
+from email.message import EmailMessage
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -66,7 +68,7 @@ class GmailClient:
         return [m["id"] for m in resp.get("messages", [])]
 
     def get_message(self, message_id: str) -> dict:
-        return self.service.users().messages().get(userId="me", id=message_id).execute()
+        return self.service.users().messages().get(userId="me", id=message_id, format="full").execute()
 
     def get_attachment_bytes(self, message_id: str, attachment_id: str) -> bytes:
         resp = (
@@ -100,3 +102,63 @@ class GmailClient:
             id=message_id,
             body={"addLabelIds": [processed_label_id], "removeLabelIds": ["INBOX"]},
         ).execute()
+
+    def mark_failed(self, message_id: str, failed_label_id: str) -> None:
+        self.service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"addLabelIds": [failed_label_id]},
+        ).execute()
+
+    def _get_header(self, message: dict, header_name: str) -> str:
+        headers = message.get("payload", {}).get("headers", [])
+        for header in headers:
+            if header.get("name", "").lower() == header_name.lower():
+                return header.get("value", "")
+        return ""
+
+    def reply_with_attachment(
+        self,
+        original_message: dict,
+        attachment_path: str,
+        body_text: str,
+    ) -> None:
+        to_addr = self._get_header(original_message, "Reply-To") or self._get_header(original_message, "From")
+        subject = self._get_header(original_message, "Subject")
+        message_id_header = self._get_header(original_message, "Message-ID")
+        thread_id = original_message.get("threadId")
+
+        if subject and not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+
+        msg = EmailMessage()
+        msg["To"] = to_addr
+        msg["Subject"] = subject or "Re:"
+        if message_id_header:
+            msg["In-Reply-To"] = message_id_header
+            msg["References"] = message_id_header
+
+        msg.set_content(body_text)
+
+        file_path = Path(attachment_path)
+        data = file_path.read_bytes()
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        if mime_type:
+            maintype, subtype = mime_type.split("/", 1)
+        else:
+            maintype, subtype = "application", "octet-stream"
+
+        msg.add_attachment(
+            data,
+            maintype=maintype,
+            subtype=subtype,
+            filename=file_path.name,
+        )
+
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+
+        body = {"raw": raw}
+        if thread_id:
+            body["threadId"] = thread_id
+
+        self.service.users().messages().send(userId="me", body=body).execute()
