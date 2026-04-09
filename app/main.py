@@ -59,29 +59,54 @@ def find_latest_historian(output_dir: str, code: str) -> str | None:
     return str(filtered[0])
 
 
+def get_retrieval_target(subject: str) -> tuple[str, str] | None:
+    normalized = subject.strip().lower()
+
+    if normalized == "retrieve blu1 historian":
+        return ("BLU1", "BLU1")
+
+    if normalized == "retrieve blu2 historian":
+        return ("BLU2", "BLU2")
+
+    if normalized == "retrieve bru1 historian":
+        return ("BRU1", "BRU1")
+
+    if normalized == "retrieve bru2 historian":
+        return ("BRU2", "BRU2")
+
+    return None
+
+
 def handle_retrieval_request(message: dict, gmail: GmailClient, settings, processed_label_id: str, failed_label_id: str) -> bool:
-    subject = get_subject(message).strip().lower()
+    subject = get_subject(message)
     message_id = message["id"]
 
-    if subject != "retrieve blu1 historian":
+    target = get_retrieval_target(subject)
+    if target is None:
         return False
 
-    historian_path = find_latest_historian(settings.monthly_output_dir, "BLU1")
-    if historian_path is None:
-        historian_path = find_latest_historian(settings.monthly_output_dir, "BRU1")
+    requested_code, display_code = target
+
+    historian_path = find_latest_historian(settings.monthly_output_dir, requested_code)
+
+    # Fallback between BLU and BRU in case filenames use one or the other
+    if historian_path is None and requested_code.startswith("BLU"):
+        historian_path = find_latest_historian(settings.monthly_output_dir, requested_code.replace("BLU", "BRU"))
+    if historian_path is None and requested_code.startswith("BRU"):
+        historian_path = find_latest_historian(settings.monthly_output_dir, requested_code.replace("BRU", "BLU"))
 
     if historian_path is None:
         gmail.mark_failed(message_id, failed_label_id)
-        print(f"{message_id}: retrieval request found, but no BLU1/BRU1 historian file exists")
+        print(f"{message_id}: retrieval request found, but no {display_code} historian file exists")
         return True
 
     gmail.reply_with_attachment(
         original_message=message,
         attachment_path=historian_path,
-        body_text="Attached is the latest BLU1 historian file from the VPS.",
+        body_text=f"Attached is the latest {display_code} historian file from the VPS.",
     )
     gmail.mark_processed_and_archive(message_id, processed_label_id)
-    print(f"{message_id}: replied with historian attachment and archived request")
+    print(f"{message_id}: replied with {display_code} historian attachment and archived request")
     return True
 
 
