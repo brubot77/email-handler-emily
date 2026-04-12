@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
+from email.utils import parseaddr
 from pathlib import Path
 
 from app.config import load_settings
@@ -38,6 +40,24 @@ def get_subject(message: dict) -> str:
         if header.get("name", "").lower() == "subject":
             return header.get("value", "")
     return ""
+
+
+def get_sender(message: dict) -> str:
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        if header.get("name", "").lower() == "from":
+            _, email_addr = parseaddr(header.get("value", ""))
+            return email_addr.strip().lower()
+    return ""
+
+
+def get_allowed_senders() -> set[str]:
+    raw = os.getenv("ALLOWED_SENDERS", "")
+    return {
+        email.strip().lower()
+        for email in raw.split(",")
+        if email.strip()
+    }
 
 
 def find_latest_historian(output_dir: str, code: str) -> str | None:
@@ -77,7 +97,13 @@ def get_retrieval_target(subject: str) -> tuple[str, str] | None:
     return None
 
 
-def handle_retrieval_request(message: dict, gmail: GmailClient, settings, processed_label_id: str, failed_label_id: str) -> bool:
+def handle_retrieval_request(
+    message: dict,
+    gmail: GmailClient,
+    settings,
+    processed_label_id: str,
+    failed_label_id: str,
+) -> bool:
     subject = get_subject(message)
     message_id = message["id"]
 
@@ -91,9 +117,15 @@ def handle_retrieval_request(message: dict, gmail: GmailClient, settings, proces
 
     # Fallback between BLU and BRU in case filenames use one or the other
     if historian_path is None and requested_code.startswith("BLU"):
-        historian_path = find_latest_historian(settings.monthly_output_dir, requested_code.replace("BLU", "BRU"))
+        historian_path = find_latest_historian(
+            settings.monthly_output_dir,
+            requested_code.replace("BLU", "BRU"),
+        )
     if historian_path is None and requested_code.startswith("BRU"):
-        historian_path = find_latest_historian(settings.monthly_output_dir, requested_code.replace("BRU", "BLU"))
+        historian_path = find_latest_historian(
+            settings.monthly_output_dir,
+            requested_code.replace("BRU", "BLU"),
+        )
 
     if historian_path is None:
         gmail.mark_failed(message_id, failed_label_id)
@@ -117,6 +149,8 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings()
+    allowed_senders = get_allowed_senders()
+
     Path(settings.monthly_input_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.monthly_output_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.deal_input_dir).mkdir(parents=True, exist_ok=True)
@@ -133,6 +167,7 @@ def main() -> None:
     gmail.create_label_if_missing(settings.needs_review_label)
 
     print(f"Found {len(message_ids)} matching message(s)")
+    print(f"Allowed senders configured: {len(allowed_senders)}")
 
     monthly_saved = False
     deal_saved = False
@@ -143,6 +178,11 @@ def main() -> None:
             continue
 
         message = gmail.get_message(message_id)
+        sender = get_sender(message)
+
+        if allowed_senders and sender not in allowed_senders:
+            print(f"{message_id}: sender '{sender}' not allowed, skipping without changes")
+            continue
 
         if args.process:
             handled = handle_retrieval_request(
