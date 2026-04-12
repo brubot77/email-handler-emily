@@ -21,8 +21,26 @@ class Settings:
     needs_review_label: str
 
 
+def build_gmail_query(base_query: str, allowed_senders_raw: str) -> str:
+    allowed_senders = [
+        email.strip()
+        for email in allowed_senders_raw.split(",")
+        if email.strip()
+    ]
+
+    if not allowed_senders:
+        return base_query
+
+    sender_query = " OR ".join(f"from:{email}" for email in allowed_senders)
+    return f"{base_query} ({sender_query})"
+
+
 def load_settings() -> Settings:
     load_dotenv()
+
+    base_gmail_query = os.environ["GMAIL_QUERY"]
+    allowed_senders_raw = os.getenv("ALLOWED_SENDERS", "")
+
     return Settings(
         gmail_credentials_path=os.environ["GMAIL_CREDENTIALS_PATH"],
         gmail_token_path=os.environ["GMAIL_TOKEN_PATH"],
@@ -32,7 +50,7 @@ def load_settings() -> Settings:
         unmatched_dir=os.environ["UNMATCHED_DIR"],
         state_file=os.environ["STATE_FILE"],
         log_file=os.environ["LOG_FILE"],
-        gmail_query=os.environ["GMAIL_QUERY"],
+        gmail_query=build_gmail_query(base_gmail_query, allowed_senders_raw),
         processed_label=os.environ["PROCESSED_LABEL"],
         failed_label=os.environ["FAILED_LABEL"],
         needs_review_label=os.environ["NEEDS_REVIEW_LABEL"],
