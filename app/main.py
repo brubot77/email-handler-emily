@@ -16,7 +16,7 @@ from app.state_store import StateStore
 
 
 MONTHLY_DIR = "/home/brubot77/Monthly-Analyzer/input"
-DEAL_DIR = "/home/brubot77/Deal-Analyzer/input"
+DEAL_DIR = "/home/brubot77/.openclaw/workspace/shannon/Input"
 
 DEFAULT_RATE_LIMIT_SLEEP_SECONDS = 900  # 15 minutes
 DEFAULT_GENERAL_ERROR_SLEEP_SECONDS = 60
@@ -33,9 +33,9 @@ def trigger_monthly_analyzer() -> None:
 
 def trigger_deal_analyzer() -> None:
     cmd = (
-        "cd /home/brubot77/Deal-Analyzer "
-        "&& source venv/bin/activate "
-        "&& ./run_if_new.sh"
+        "cd /home/brubot77/.openclaw/workspace/shannon "
+        "&& source .venv/bin/activate "
+        "&& python3 -m shannon.cli"
     )
     subprocess.run(["bash", "-lc", cmd], check=False)
 
@@ -307,17 +307,22 @@ def main() -> int:
 
         if deal_saved:
             print("Triggering Deal Analyzer...")
-            trigger_deal_analyzer()
 
             output_dir = Path("/home/brubot77/.openclaw/workspace/shannon/Output")
+            before_outputs = {str(p) for p in output_dir.glob("*.xlsx")}
+
+            trigger_deal_analyzer()
+
             outputs = sorted(
                 output_dir.glob("*.xlsx"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
 
-            if outputs:
-                newest_output = str(outputs[0])
+            new_outputs = [p for p in outputs if str(p) not in before_outputs]
+
+            if new_outputs:
+                newest_output = str(new_outputs[0])
                 print(f"Latest Shannon output found: {newest_output}")
 
                 sent_message_ids: set[str] = set()
@@ -343,7 +348,7 @@ def main() -> int:
                     except Exception as e:
                         print(f"{message_id}: reply failed: {e}")
             else:
-                print("Deal Analyzer ran but no output .xlsx was found.")
+                print("Deal Analyzer ran but no new output .xlsx was found.")
 
     return 0
 
