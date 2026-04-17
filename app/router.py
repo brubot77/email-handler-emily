@@ -20,7 +20,12 @@ def choose_destination(filename, subject, monthly_dir, deal_dir, unmatched_dir):
 
     # Deal Analyzer routing
     if (
-        ("mls" in subject_lower and filename_lower.endswith((".csv", ".xlsx", ".xls")))
+        (
+            "mls" in subject_lower
+            or "run deal analyzer" in subject_lower
+            or "deal analyzer" in subject_lower
+        )
+        and filename_lower.endswith((".csv", ".xlsx", ".xls"))
     ):
         return Path(deal_dir)
 
