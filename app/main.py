@@ -31,14 +31,28 @@ def trigger_monthly_analyzer() -> None:
     subprocess.run(["bash", "-lc", cmd], check=False)
 
 
-def trigger_deal_analyzer() -> None:
+def trigger_deal_analyzer() -> int:
     cmd = (
         "cd /home/brubot77/.openclaw/workspace/shannon "
         "&& source .venv/bin/activate "
         "&& python3 -m shannon.cli"
     )
-    subprocess.run(["bash", "-lc", cmd], check=False)
+    result = subprocess.run(
+        ["bash", "-lc", cmd],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
+    print(f"Deal Analyzer exit code: {result.returncode}")
+    if result.stdout:
+        print("Deal Analyzer stdout:")
+        print(result.stdout)
+    if result.stderr:
+        print("Deal Analyzer stderr:")
+        print(result.stderr)
+
+    return result.returncode
 
 def get_subject(message: dict) -> str:
     headers = message.get("payload", {}).get("headers", [])
@@ -291,8 +305,10 @@ def main() -> int:
                 print(f"{message_id}: monthly attachment processed and archived")
 
             elif saved_any_deal:
-                print(f"{message_id}: deal attachment saved; waiting for analyzer result before archiving")
-
+                processed_ids.add(message_id)
+                state.save(processed_ids)
+                print(f"{message_id}: deal attachment saved and marked in-progress; waiting for analyzer result before archiving")
+            
             else:
                 # Unmatched attachments were saved, but do not auto-archive.
                 print(f"{message_id}: attachments saved to unmatched; not archiving")
@@ -311,7 +327,9 @@ def main() -> int:
             output_dir = Path("/home/brubot77/.openclaw/workspace/shannon/Output")
             before_outputs = {str(p) for p in output_dir.glob("*.xlsx")}
 
-            trigger_deal_analyzer()
+            deal_rc = trigger_deal_analyzer()
+            if deal_rc != 0:
+                print(f"Deal Analyzer failed with exit code {deal_rc}")
 
             outputs = sorted(
                 output_dir.glob("*.xlsx"),
