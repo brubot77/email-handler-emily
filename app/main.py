@@ -151,6 +151,14 @@ def handle_retrieval_request(
 
     requested_code, display_code = target
 
+    print(f"{message_id}: retrieval request for {display_code} received")
+    print(f"{message_id}: triggering Monthly Analyzer before retrieval reply")
+
+    trigger_monthly_analyzer()
+
+    # Give filesystem a moment in case analyzer finishes right at subprocess return
+    time.sleep(2)
+
     historian_path = find_latest_historian(settings.monthly_output_dir, requested_code)
 
     # Fallback between BLU and BRU in case filenames use one or the other
@@ -167,16 +175,16 @@ def handle_retrieval_request(
 
     if historian_path is None:
         gmail.mark_failed(message_id, failed_label_id)
-        print(f"{message_id}: retrieval request found, but no {display_code} historian file exists")
+        print(f"{message_id}: retrieval request found, but no {display_code} historian file exists after analyzer run")
         return True
 
     gmail.reply_with_attachment(
         original_message=message,
         attachment_path=historian_path,
-        body_text=f"Attached is the latest {display_code} historian file from the VPS.",
+        body_text=f"Attached is the latest {display_code} historian file from the VPS. Monthly Analyzer was run first to process any PDFs waiting in the input folder.",
     )
     gmail.mark_processed_and_archive(message_id, processed_label_id)
-    print(f"{message_id}: replied with {display_code} historian attachment and archived request")
+    print(f"{message_id}: replied with {display_code} historian attachment after analyzer run and archived request")
     return True
 
 
