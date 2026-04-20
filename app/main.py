@@ -143,14 +143,30 @@ def decode_message_body(message: dict) -> str:
     return ""
 
 
-def parse_address_update_body(body_text: str) -> dict[str, str]:
-    buckets = {
-        "address": [],
-        "status": [],
-        "notes": [],
-    }
+def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
+    updates: list[dict[str, str]] = []
+    current: dict[str, list[str]] | None = None
+    current_field: str | None = None
 
-    current = None
+    def finalize_current() -> None:
+        nonlocal current
+        if not current:
+            return
+
+        address = " ".join(current.get("address", [])).strip()
+        status = " ".join(current.get("status", [])).strip()
+        notes = "\n".join(current.get("notes", [])).strip()
+
+        if address or status or notes:
+            updates.append(
+                {
+                    "address": address,
+                    "status": status,
+                    "notes": notes,
+                }
+            )
+
+        current = None
 
     for raw_line in body_text.splitlines():
         line = raw_line.strip()
@@ -160,43 +176,52 @@ def parse_address_update_body(body_text: str) -> dict[str, str]:
         lower = line.lower()
 
         if lower.startswith("address:"):
-            current = "address"
+            # Start a new block whenever we hit a new Address:
+            if current is not None:
+                finalize_current()
+
+            current = {
+                "address": [],
+                "status": [],
+                "notes": [],
+            }
+            current_field = "address"
+
             value = line.split(":", 1)[1].strip()
             if value:
-                buckets[current].append(value)
+                current["address"].append(value)
+            continue
+
+        if current is None:
+            # Ignore anything before the first Address:
             continue
 
         if lower.startswith("status update:"):
-            current = "status"
+            current_field = "status"
             value = line.split(":", 1)[1].strip()
             if value:
-                buckets[current].append(value)
+                current["status"].append(value)
             continue
 
         if lower.startswith("status:"):
-            current = "status"
+            current_field = "status"
             value = line.split(":", 1)[1].strip()
             if value:
-                buckets[current].append(value)
+                current["status"].append(value)
             continue
 
         if lower.startswith("notes:"):
-            current = "notes"
+            current_field = "notes"
             value = line.split(":", 1)[1].strip()
             if value:
-                buckets[current].append(value)
+                current["notes"].append(value)
             continue
 
-        if current is None and not buckets["address"]:
-            buckets["address"].append(line)
-        elif current:
-            buckets[current].append(line)
+        if current_field:
+            current[current_field].append(line)
 
-    return {
-        "address": " ".join(buckets["address"]).strip(),
-        "status": " ".join(buckets["status"]).strip(),
-        "notes": "\n".join(buckets["notes"]).strip(),
-    }
+    finalize_current()
+    return updates
 
 
 def handle_address_update_request(
@@ -212,51 +237,64 @@ def handle_address_update_request(
 
     message_id = message["id"]
     body_text = decode_message_body(message)
-    parsed = parse_address_update_body(body_text)
+    parsed_updates = parse_address_update_body(body_text)
 
-    address = parsed.get("address", "")
-    new_status = parsed.get("status", "")
-    new_note = parsed.get("notes", "")
-
-    if not address or not new_status:
+    if not parsed_updates:
         gmail.mark_failed(message_id, failed_label_id)
-        print(f"{message_id}: update address email missing required Address or Status Update")
+        print(f"{message_id}: update address email contained no valid update blocks")
         return True
 
     now = dt.datetime.now(dt.UTC).isoformat()
-    property_key = canonical_property_key(address)
-
     property_state = load_property_state()
-    state_entry = property_state.get(property_key)
 
-    if state_entry is None:
-        state_entry = {
-            "display_address": address,
-            "status": "Under Review",
-            "notes_history": [],
-            "first_seen_utc": now,
-            "last_seen_utc": now,
-        }
-        property_state[property_key] = state_entry
+    updated_count = 0
 
-    state_entry["display_address"] = address
-    state_entry["status"] = new_status
-    state_entry["last_seen_utc"] = now
-    state_entry.setdefault("notes_history", [])
+    for parsed in parsed_updates:
+        address = parsed.get("address", "")
+        new_status = parsed.get("status", "")
+        new_note = parsed.get("notes", "")
 
-    if new_note:
-        state_entry["notes_history"].append(
-            {
-                "timestamp_utc": now,
-                "sender": sender,
-                "note": new_note,
+        if not address or not new_status:
+            print(f"{message_id}: skipping incomplete update block address='{address}' status='{new_status}'")
+            continue
+
+        property_key = canonical_property_key(address)
+        state_entry = property_state.get(property_key)
+
+        if state_entry is None:
+            state_entry = {
+                "display_address": address,
+                "status": "Under Review",
+                "notes_history": [],
+                "first_seen_utc": now,
+                "last_seen_utc": now,
             }
-        )
+            property_state[property_key] = state_entry
+
+        state_entry["display_address"] = address
+        state_entry["status"] = new_status
+        state_entry["last_seen_utc"] = now
+        state_entry.setdefault("notes_history", [])
+
+        if new_note:
+            state_entry["notes_history"].append(
+                {
+                    "timestamp_utc": now,
+                    "sender": sender,
+                    "note": new_note,
+                }
+            )
+
+        updated_count += 1
+
+    if updated_count == 0:
+        gmail.mark_failed(message_id, failed_label_id)
+        print(f"{message_id}: no complete update blocks found in Update Address email")
+        return True
 
     save_property_state(property_state)
-
     gmail.mark_processed_and_archive(message_id, processed_label_id)
-    print(f"{message_id}: updated property state for '{address}' with status '{new_status}'")
+    print(f"{message_id}: updated {updated_count} property record(s) from Update Address email")
     return True
 
 def main():
