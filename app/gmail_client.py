@@ -162,3 +162,18 @@ class GmailClient:
             body["threadId"] = thread_id
 
         self.service.users().messages().send(userId="me", body=body).execute()
+
+def get_subject(message: dict) -> str:
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        if header.get("name", "").lower() == "subject":
+            return header.get("value", "")
+    return ""
+
+
+def get_sender(message: dict) -> str:
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        if header.get("name", "").lower() == "from":
+            return header.get("value", "").lower()
+    return ""
