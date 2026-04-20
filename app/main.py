@@ -17,6 +17,7 @@ from app.state_store import StateStore
 
 MONTHLY_DIR = "/home/brubot77/Monthly-Analyzer/input"
 DEAL_DIR = "/home/brubot77/.openclaw/workspace/shannon/Input"
+DEAL_OUTPUT_DIR = "/home/brubot77/.openclaw/workspace/shannon/Output"
 
 DEFAULT_RATE_LIMIT_SLEEP_SECONDS = 900  # 15 minutes
 DEFAULT_GENERAL_ERROR_SLEEP_SECONDS = 60
@@ -53,6 +54,7 @@ def trigger_deal_analyzer() -> int:
         print(result.stderr)
 
     return result.returncode
+
 
 def get_subject(message: dict) -> str:
     headers = message.get("payload", {}).get("headers", [])
@@ -96,6 +98,16 @@ def get_general_error_sleep_seconds() -> int:
         return max(value, 10)
     except ValueError:
         return DEFAULT_GENERAL_ERROR_SLEEP_SECONDS
+
+
+def is_deal_analyzer_request(subject: str) -> bool:
+    normalized = subject.strip().lower()
+    return normalized in {
+        "run deal analyzer",
+        "deal analyzer",
+        "run shannon",
+        "run shannon deal analyzer",
+    }
 
 
 def find_latest_historian(output_dir: str, code: str) -> str | None:
@@ -155,13 +167,10 @@ def handle_retrieval_request(
     print(f"{message_id}: triggering Monthly Analyzer before retrieval reply")
 
     trigger_monthly_analyzer()
-
-    # Give filesystem a moment in case analyzer finishes right at subprocess return
     time.sleep(2)
 
     historian_path = find_latest_historian(settings.monthly_output_dir, requested_code)
 
-    # Fallback between BLU and BRU in case filenames use one or the other
     if historian_path is None and requested_code.startswith("BLU"):
         historian_path = find_latest_historian(
             settings.monthly_output_dir,
@@ -237,7 +246,7 @@ def main() -> int:
 
     monthly_saved = False
     deal_saved = False
-    deal_request_messages: list[dict] = []
+    deal_request_messages: dict[str, dict] = {}
     monthly_processed_message_ids: set[str] = set()
 
     for message_id in message_ids:
@@ -266,6 +275,8 @@ def main() -> int:
         if allowed_senders and sender not in allowed_senders:
             print(f"{message_id}: sender '{sender}' not allowed, skipping without changes")
             continue
+
+        subject = get_subject(message)
 
         if args.process:
             handled = handle_retrieval_request(
@@ -298,11 +309,9 @@ def main() -> int:
 
             if path.startswith(DEAL_DIR):
                 deal_saved = True
-                deal_request_messages.append(message)
+                deal_request_messages[message_id] = message
 
-        if args.process and saved_paths:
-            # For monthly-only saves, archive immediately.
-            # For deal requests, wait until Shannon finishes and reply succeeds.
+        if args.process:
             saved_any_deal = any(path.startswith(DEAL_DIR) for path in saved_paths)
             saved_any_monthly = any(path.startswith(MONTHLY_DIR) for path in saved_paths)
 
@@ -313,16 +322,18 @@ def main() -> int:
                 print(f"{message_id}: monthly attachment processed and archived")
 
             elif saved_any_deal:
-                processed_ids.add(message_id)
-                state.save(processed_ids)
-                print(f"{message_id}: deal attachment saved and marked in-progress; waiting for analyzer result before archiving")
-            
-            else:
-                # Unmatched attachments were saved, but do not auto-archive.
+                print(f"{message_id}: deal attachment saved; waiting for analyzer result before marking processed")
+
+            elif is_deal_analyzer_request(subject):
+                deal_saved = True
+                deal_request_messages[message_id] = message
+                print(f"{message_id}: subject requested deal analyzer run without attachment")
+
+            elif saved_paths:
                 print(f"{message_id}: attachments saved to unmatched; not archiving")
 
-        elif args.process and not saved_paths:
-            print(f"{message_id}: no saveable attachments, not archiving")
+            else:
+                print(f"{message_id}: no saveable attachments, not archiving")
 
     if args.process:
         if monthly_saved:
@@ -332,12 +343,15 @@ def main() -> int:
         if deal_saved:
             print("Triggering Deal Analyzer...")
 
-            output_dir = Path("/home/brubot77/.openclaw/workspace/shannon/Output")
-            before_outputs = {str(p) for p in output_dir.glob("*.xlsx")}
+            output_dir = Path(DEAL_OUTPUT_DIR)
+            before_outputs = {str(p): p.stat().st_mtime for p in output_dir.glob("*.xlsx")}
 
             deal_rc = trigger_deal_analyzer()
             if deal_rc != 0:
                 print(f"Deal Analyzer failed with exit code {deal_rc}")
+                for message_id, _message in deal_request_messages.items():
+                    gmail.mark_failed(message_id, failed_label_id)
+                return 1
 
             outputs = sorted(
                 output_dir.glob("*.xlsx"),
@@ -345,19 +359,20 @@ def main() -> int:
                 reverse=True,
             )
 
-            new_outputs = [p for p in outputs if str(p) not in before_outputs]
+            newest_output: str | None = None
+            for p in outputs:
+                old_mtime = before_outputs.get(str(p))
+                if old_mtime is None or p.stat().st_mtime > old_mtime:
+                    newest_output = str(p)
+                    break
 
-            if new_outputs:
-                newest_output = str(new_outputs[0])
+            if newest_output is None and outputs:
+                newest_output = str(outputs[0])
+
+            if newest_output:
                 print(f"Latest Shannon output found: {newest_output}")
 
-                sent_message_ids: set[str] = set()
-
-                for message in deal_request_messages:
-                    message_id = message["id"]
-                    if message_id in sent_message_ids:
-                        continue
-
+                for message_id, message in deal_request_messages.items():
                     try:
                         gmail.reply_with_attachment(
                             original_message=message,
@@ -369,12 +384,14 @@ def main() -> int:
                         state.save(processed_ids)
                         gmail.mark_processed_and_archive(message_id, processed_label_id)
 
-                        sent_message_ids.add(message_id)
                         print(f"{message_id}: replied with Deal Analyzer output and archived")
                     except Exception as e:
                         print(f"{message_id}: reply failed: {e}")
+                        gmail.mark_failed(message_id, failed_label_id)
             else:
-                print("Deal Analyzer ran but no new output .xlsx was found.")
+                print("Deal Analyzer ran but no output .xlsx was found.")
+                for message_id, _message in deal_request_messages.items():
+                    gmail.mark_failed(message_id, failed_label_id)
 
     return 0
 

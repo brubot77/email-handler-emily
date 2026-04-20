@@ -39,7 +39,11 @@ def save_attachments(message: dict, gmail_client, monthly_dir: str, deal_dir: st
                 subject = header.get("value", "")
                 break
 
+        print(f"Attachment routing debug: filename='{filename}', subject='{subject}'")
+        
         dest_dir = choose_destination(
+            
+        print(f"Attachment routing debug: destination='{dest_dir}'")
             filename,
             subject,
             monthly_dir,
