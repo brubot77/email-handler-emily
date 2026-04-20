@@ -12,6 +12,7 @@ import datetime as dt
 from googleapiclient.errors import HttpError
 
 from app.config import load_settings
+from app.gmail_client import get_subject
 from app.gmail_client import GmailClient
 from app.processor import save_attachments
 from app.state_store import StateStore
