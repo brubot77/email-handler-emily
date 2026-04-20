@@ -19,7 +19,13 @@ def extract_parts(payload: dict) -> list[dict]:
     return parts
 
 
-def save_attachments(message: dict, gmail_client, monthly_dir: str, deal_dir: str, unmatched_dir: str) -> list[str]:
+def save_attachments(
+    message: dict,
+    gmail_client,
+    monthly_dir: str,
+    deal_dir: str,
+    unmatched_dir: str,
+) -> list[str]:
     saved_paths: list[str] = []
     payload = message.get("payload", {})
     parts = extract_parts(payload)
@@ -33,33 +39,32 @@ def save_attachments(message: dict, gmail_client, monthly_dir: str, deal_dir: st
             continue
 
         subject = ""
-
         for header in message.get("payload", {}).get("headers", []):
-            if header.get("name") == "Subject":
+            if header.get("name", "").lower() == "subject":
                 subject = header.get("value", "")
                 break
 
         print(f"Attachment routing debug: filename='{filename}', subject='{subject}'")
-        
+
         dest_dir = choose_destination(
-            
-        print(f"Attachment routing debug: destination='{dest_dir}'")
             filename,
             subject,
             monthly_dir,
             deal_dir,
             unmatched_dir,
         )
-        
+
+        print(f"Attachment routing debug: destination='{dest_dir}'")
+
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         data = gmail_client.get_attachment_bytes(message["id"], attachment_id)
+
         clean_name = filename
         if clean_name.lower().endswith(".pdf.pdf"):
             clean_name = clean_name[:-4]
 
         dest_path = dest_dir / clean_name
-        
         dest_path.write_bytes(data)
         saved_paths.append(str(dest_path))
 
