@@ -295,7 +295,7 @@ def main():
 
         message = gmail.get_message(message_id)
 
-        sender = gmail.get_sender(message)
+        sender = get_sender(message)
 
         handled_update = handle_address_update_request(
             message,
