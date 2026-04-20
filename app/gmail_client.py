@@ -4,6 +4,7 @@ import base64
 import mimetypes
 import os
 from email.message import EmailMessage
+from email.utils import parseaddr
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -12,6 +13,23 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+
+
+def get_subject(message: dict) -> str:
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        if header.get("name", "").lower() == "subject":
+            return header.get("value", "")
+    return ""
+
+
+def get_sender(message: dict) -> str:
+    headers = message.get("payload", {}).get("headers", [])
+    for header in headers:
+        if header.get("name", "").lower() == "from":
+            _, email_addr = parseaddr(header.get("value", ""))
+            return email_addr.strip().lower()
+    return ""
 
 
 class GmailClient:
@@ -162,18 +180,3 @@ class GmailClient:
             body["threadId"] = thread_id
 
         self.service.users().messages().send(userId="me", body=body).execute()
-
-def get_subject(message: dict) -> str:
-    headers = message.get("payload", {}).get("headers", [])
-    for header in headers:
-        if header.get("name", "").lower() == "subject":
-            return header.get("value", "")
-    return ""
-
-
-def get_sender(message: dict) -> str:
-    headers = message.get("payload", {}).get("headers", [])
-    for header in headers:
-        if header.get("name", "").lower() == "from":
-            return header.get("value", "").lower()
-    return ""
