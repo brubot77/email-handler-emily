@@ -155,13 +155,15 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
 
         address = " ".join(current.get("address", [])).strip()
         status = " ".join(current.get("status", [])).strip()
+        zest_rent = " ".join(current.get("zest_rent", [])).strip()
         notes = "\n".join(current.get("notes", [])).strip()
 
-        if address or status or notes:
+        if address or status or zest_rent or notes:
             updates.append(
                 {
                     "address": address,
                     "status": status,
+                    "zest_rent": zest_rent,
                     "notes": notes,
                 }
             )
@@ -176,13 +178,13 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
         lower = line.lower()
 
         if lower.startswith("address:"):
-            # Start a new block whenever we hit a new Address:
             if current is not None:
                 finalize_current()
 
             current = {
                 "address": [],
                 "status": [],
+                "zest_rent": [],
                 "notes": [],
             }
             current_field = "address"
@@ -193,7 +195,6 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
             continue
 
         if current is None:
-            # Ignore anything before the first Address:
             continue
 
         if lower.startswith("status update:"):
@@ -208,6 +209,13 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
             value = line.split(":", 1)[1].strip()
             if value:
                 current["status"].append(value)
+            continue
+
+        if lower.startswith("zest rent:"):
+            current_field = "zest_rent"
+            value = line.split(":", 1)[1].strip()
+            if value:
+                current["zest_rent"].append(value)
             continue
 
         if lower.startswith("notes:"):
@@ -252,10 +260,11 @@ def handle_address_update_request(
     for parsed in parsed_updates:
         address = parsed.get("address", "")
         new_status = parsed.get("status", "")
+        new_zest_rent = parsed.get("zest_rent", "")
         new_note = parsed.get("notes", "")
 
-        if not address or not new_status:
-            print(f"{message_id}: skipping incomplete update block address='{address}' status='{new_status}'")
+        if not address:
+            print(f"{message_id}: skipping update block with missing address")
             continue
 
         property_key = canonical_property_key(address)
@@ -265,6 +274,7 @@ def handle_address_update_request(
             state_entry = {
                 "display_address": address,
                 "status": "Under Review",
+                "zest_rent": "",
                 "notes_history": [],
                 "first_seen_utc": now,
                 "last_seen_utc": now,
@@ -272,9 +282,16 @@ def handle_address_update_request(
             property_state[property_key] = state_entry
 
         state_entry["display_address"] = address
-        state_entry["status"] = new_status
         state_entry["last_seen_utc"] = now
+        state_entry.setdefault("status", "Under Review")
+        state_entry.setdefault("zest_rent", "")
         state_entry.setdefault("notes_history", [])
+
+        if new_status:
+            state_entry["status"] = new_status
+
+        if new_zest_rent:
+            state_entry["zest_rent"] = new_zest_rent
 
         if new_note:
             state_entry["notes_history"].append(
@@ -289,7 +306,7 @@ def handle_address_update_request(
 
     if updated_count == 0:
         gmail.mark_failed(message_id, failed_label_id)
-        print(f"{message_id}: no complete update blocks found in Update Address email")
+        print(f"{message_id}: no usable update blocks found in Update Address email")
         return True
 
     save_property_state(property_state)
