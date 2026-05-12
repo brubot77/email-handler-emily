@@ -13,7 +13,11 @@ from googleapiclient.errors import HttpError
 
 from app.config import load_settings
 from app.gmail_client import GmailClient, get_subject, get_sender
-from app.processor import save_attachments
+from app.processor import (
+    save_attachments,
+    get_subject,
+    get_historian_request,
+)
 from app.state_store import StateStore
 
 PROPERTY_STATE_PATH = Path("/home/brubot77/.openclaw/workspace/shannon/property_state.json")
@@ -314,6 +318,51 @@ def handle_address_update_request(
     print(f"{message_id}: updated {updated_count} property record(s) from Update Address email")
     return True
 
+def handle_historian_request(
+    message: dict,
+    gmail: GmailClient,
+    processed_label_id: str,
+    failed_label_id: str,
+) -> bool:
+
+    subject = get_subject(message)
+    historian_file = get_historian_request(subject)
+
+    if not historian_file:
+        return False
+
+    historian_path = (
+        Path("/home/brubot77/Monthly-Analyzer/output")
+        / historian_file
+    )
+
+    message_id = message["id"]
+
+    if not historian_path.exists():
+        print(f"{message_id}: historian file missing -> {historian_path}")
+
+        gmail.mark_failed(
+            message_id,
+            failed_label_id,
+        )
+
+        return True
+
+    print(f"{message_id}: historian retrieval matched -> {historian_path}")
+
+    gmail.reply_with_attachment(
+        original_message=message,
+        attachment_path=str(historian_path),
+        body_text=f"Attached is the requested historian file: {historian_file}",
+    )
+
+    gmail.mark_processed_and_archive(
+        message_id,
+        processed_label_id,
+    )
+
+    return True
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--process", action="store_true")
@@ -350,6 +399,18 @@ def main():
 
         message = gmail.get_message(message_id)
 
+        handled_historian = handle_historian_request(
+            message,
+            gmail,
+            processed_label_id,
+            failed_label_id,
+        )
+
+        if handled_historian:
+            processed_ids.add(message_id)
+            state.save(processed_ids)
+            continue       
+        
         sender = get_sender(message)
 
         handled_update = handle_address_update_request(

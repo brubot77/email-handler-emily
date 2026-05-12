@@ -19,6 +19,30 @@ def extract_parts(payload: dict) -> list[dict]:
     return parts
 
 
+def get_subject(message: dict) -> str:
+    for header in message.get("payload", {}).get("headers", []):
+        if header.get("name", "").lower() == "subject":
+            return header.get("value", "")
+    return ""
+
+
+def get_historian_request(subject: str) -> str | None:
+    subject_lower = str(subject or "").lower().strip()
+
+    routes = {
+        "retrieve blu1 historian": "BLU1_historian.xlsx",
+        "retrieve blu2 historian": "BLU2_historian.xlsx",
+        "retrieve bru1 historian": "BRU1_historian.xlsx",
+        "retrieve bru2 historian": "BRU2_historian.xlsx",
+    }
+
+    for trigger, filename in routes.items():
+        if trigger in subject_lower:
+            return filename
+
+    return None
+
+
 def save_attachments(
     message: dict,
     gmail_client,
@@ -38,11 +62,7 @@ def save_attachments(
         if not filename or not attachment_id:
             continue
 
-        subject = ""
-        for header in message.get("payload", {}).get("headers", []):
-            if header.get("name", "").lower() == "subject":
-                subject = header.get("value", "")
-                break
+        subject = get_subject(message)
 
         print(f"Attachment routing debug: filename='{filename}', subject='{subject}'")
 

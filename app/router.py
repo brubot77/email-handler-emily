@@ -10,8 +10,13 @@ def choose_destination(filename, subject, monthly_dir, deal_dir, unmatched_dir):
         * subject must contain "monthly statement"
         * file must be a PDF
         * filename must include one of bru1, bru2, blu1, blu2
+
     - Deal Analyzer (Shannon):
         * any CSV goes to Shannon input
+
+    - Historian Retrieval:
+        * subject contains "retrieve xxx historian"
+
     - Otherwise:
         * unmatched
     """
@@ -23,7 +28,30 @@ def choose_destination(filename, subject, monthly_dir, deal_dir, unmatched_dir):
 
     print(f"Router debug: filename='{filename_lower}', subject='{subject_lower}'")
 
+    # =========================================================
+    # Historian retrieval routes
+    # =========================================================
+
+    historian_requests = {
+        "retrieve blu1 historian": "BLU1_historian.xlsx",
+        "retrieve blu2 historian": "BLU2_historian.xlsx",
+        "retrieve bru1 historian": "BRU1_historian.xlsx",
+        "retrieve bru2 historian": "BRU2_historian.xlsx",
+    }
+
+    for trigger, workbook in historian_requests.items():
+        if trigger in subject_lower:
+            print(f"Router debug: matched historian retrieval route -> {workbook}")
+
+            return {
+                "action": "retrieve_historian",
+                "workbook": workbook,
+            }
+
+    # =========================================================
     # Monthly Analyzer routing
+    # =========================================================
+
     if (
         filename_lower.endswith(".pdf")
         and "monthly statement" in subject_lower
@@ -32,12 +60,17 @@ def choose_destination(filename, subject, monthly_dir, deal_dir, unmatched_dir):
         print("Router debug: matched monthly route")
         return Path(monthly_dir)
 
+    # =========================================================
     # Deal Analyzer routing
-    # For now, route any CSV from an allowed sender into Shannon input.
+    # =========================================================
+
     if filename_lower.endswith(".csv"):
         print("Router debug: matched deal route")
         return Path(deal_dir)
 
+    # =========================================================
     # Otherwise unmatched
+    # =========================================================
+
     print("Router debug: matched unmatched route")
     return Path(unmatched_dir)
