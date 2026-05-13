@@ -1,29 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import datetime as dt
+import json
+import re
 import subprocess
 import time
 from pathlib import Path
-import base64
-import json
-import re
-import datetime as dt
-
-from googleapiclient.errors import HttpError
 
 from app.config import load_settings
 from app.gmail_client import GmailClient, get_subject, get_sender
 from app.processor import (
     save_attachments,
-    get_subject,
     get_historian_request,
 )
 from app.state_store import StateStore
+
 
 PROPERTY_STATE_PATH = Path("/home/brubot77/.openclaw/workspace/shannon/property_state.json")
 MONTHLY_DIR = "/home/brubot77/Monthly-Analyzer/input"
 DEAL_DIR = "/home/brubot77/.openclaw/workspace/shannon/Input"
 DEAL_OUTPUT_DIR = "/home/brubot77/.openclaw/workspace/shannon/Output"
+MONTHLY_OUTPUT_DIR = Path("/home/brubot77/Monthly-Analyzer/output")
 
 
 def trigger_deal_analyzer():
@@ -63,6 +62,7 @@ def newest_output_after(before_snapshot):
 
     return None
 
+
 def canonical_property_key(
     address: str | None,
     city: str | None = "",
@@ -75,6 +75,7 @@ def canonical_property_key(
         str(state or "").strip().lower(),
         str(zip_code or "").strip()[:5],
     ]
+
     text = " ".join(p for p in parts if p)
 
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -96,16 +97,19 @@ def canonical_property_key(
         "east": "e",
         "west": "w",
     }
+
     words = [replacements.get(word, word) for word in text.split()]
     text = " ".join(words)
 
     text = re.sub(r"\s+", " ", text).strip()
+
     return text
 
 
 def load_property_state() -> dict:
     if not PROPERTY_STATE_PATH.exists():
         return {}
+
     try:
         return json.loads(PROPERTY_STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
@@ -130,10 +134,15 @@ def decode_message_body(message: dict) -> str:
 
         if mime_type == "text/plain" and data:
             padded = data + "=" * (-len(data) % 4)
+
             try:
-                decoded = base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8", errors="ignore")
+                decoded = base64.urlsafe_b64decode(
+                    padded.encode("utf-8")
+                ).decode("utf-8", errors="ignore")
+
                 if decoded.strip():
                     texts.append(decoded)
+
             except Exception:
                 pass
 
@@ -144,6 +153,7 @@ def decode_message_body(message: dict) -> str:
 
     if texts:
         return "\n".join(texts).strip()
+
     return ""
 
 
@@ -154,6 +164,7 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
 
     def finalize_current() -> None:
         nonlocal current
+
         if not current:
             return
 
@@ -176,6 +187,7 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
 
     for raw_line in body_text.splitlines():
         line = raw_line.strip()
+
         if not line:
             continue
 
@@ -191,11 +203,14 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
                 "zest_rent": [],
                 "notes": [],
             }
+
             current_field = "address"
 
             value = line.split(":", 1)[1].strip()
+
             if value:
                 current["address"].append(value)
+
             continue
 
         if current is None:
@@ -204,35 +219,44 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
         if lower.startswith("status update:"):
             current_field = "status"
             value = line.split(":", 1)[1].strip()
+
             if value:
                 current["status"].append(value)
+
             continue
 
         if lower.startswith("status:"):
             current_field = "status"
             value = line.split(":", 1)[1].strip()
+
             if value:
                 current["status"].append(value)
+
             continue
 
         if lower.startswith("zest rent:"):
             current_field = "zest_rent"
             value = line.split(":", 1)[1].strip()
+
             if value:
                 current["zest_rent"].append(value)
+
             continue
 
         if lower.startswith("notes:"):
             current_field = "notes"
             value = line.split(":", 1)[1].strip()
+
             if value:
                 current["notes"].append(value)
+
             continue
 
         if current_field:
             current[current_field].append(line)
 
     finalize_current()
+
     return updates
 
 
@@ -244,6 +268,7 @@ def handle_address_update_request(
     failed_label_id: str,
 ) -> bool:
     subject = get_subject(message).strip().lower()
+
     if subject != "update address":
         return False
 
@@ -283,6 +308,7 @@ def handle_address_update_request(
                 "first_seen_utc": now,
                 "last_seen_utc": now,
             }
+
             property_state[property_key] = state_entry
 
         state_entry["display_address"] = address
@@ -314,9 +340,16 @@ def handle_address_update_request(
         return True
 
     save_property_state(property_state)
-    gmail.mark_processed_and_archive(message_id, processed_label_id)
+
+    gmail.mark_processed_and_archive(
+        message_id,
+        processed_label_id,
+    )
+
     print(f"{message_id}: updated {updated_count} property record(s) from Update Address email")
+
     return True
+
 
 def handle_historian_request(
     message: dict,
@@ -324,19 +357,15 @@ def handle_historian_request(
     processed_label_id: str,
     failed_label_id: str,
 ) -> bool:
-
     subject = get_subject(message)
     historian_file = get_historian_request(subject)
 
     if not historian_file:
         return False
 
-    historian_path = (
-        Path("/home/brubot77/Monthly-Analyzer/output")
-        / historian_file
-    )
-
     message_id = message["id"]
+
+    historian_path = MONTHLY_OUTPUT_DIR / historian_file
 
     if not historian_path.exists():
         print(f"{message_id}: historian file missing -> {historian_path}")
@@ -356,12 +385,28 @@ def handle_historian_request(
         body_text=f"Attached is the requested historian file: {historian_file}",
     )
 
+    if historian_file in {"BLU1_historian.xlsx", "BLU2_historian.xlsx"}:
+        consolidation_path = MONTHLY_OUTPUT_DIR / "BLU_consolidation.xlsx"
+
+        if consolidation_path.exists():
+            print(f"{message_id}: sending BLU consolidation workbook -> {consolidation_path}")
+
+            gmail.reply_with_attachment(
+                original_message=message,
+                attachment_path=str(consolidation_path),
+                body_text="Attached is the current BLU consolidation workbook.",
+            )
+
+        else:
+            print(f"{message_id}: BLU consolidation workbook missing -> {consolidation_path}")
+
     gmail.mark_processed_and_archive(
         message_id,
         processed_label_id,
     )
 
     return True
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -393,7 +438,6 @@ def main():
     print(f"Found {len(message_ids)} matching message(s)")
 
     for message_id in message_ids:
-
         if message_id in processed_ids:
             continue
 
@@ -409,8 +453,8 @@ def main():
         if handled_historian:
             processed_ids.add(message_id)
             state.save(processed_ids)
-            continue       
-        
+            continue
+
         sender = get_sender(message)
 
         handled_update = handle_address_update_request(
@@ -435,13 +479,11 @@ def main():
         )
 
         for path in saved_paths:
-
             if path.startswith(DEAL_DIR):
                 print(f"{message_id}: CSV saved for Shannon run")
                 deal_requests[message_id] = message
 
     if deal_requests:
-
         print("Triggering Deal Analyzer")
 
         output_dir = Path(DEAL_OUTPUT_DIR)
@@ -476,7 +518,6 @@ def main():
         print(f"New Shannon output detected: {new_file}")
 
         for message_id, message in deal_requests.items():
-
             gmail.reply_with_attachment(
                 original_message=message,
                 attachment_path=str(new_file),
