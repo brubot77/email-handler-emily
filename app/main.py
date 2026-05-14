@@ -16,7 +16,7 @@ from app.processor import (
     get_historian_request,
 )
 from app.state_store import StateStore
-
+from app.address_organizer import organize_address_body_to_csv
 
 PROPERTY_STATE_PATH = Path("/home/brubot77/.openclaw/workspace/shannon/property_state.json")
 MONTHLY_DIR = "/home/brubot77/Monthly-Analyzer/input"
@@ -407,6 +407,41 @@ def handle_historian_request(
 
     return True
 
+def handle_address_data_request(
+    message: dict,
+    gmail: GmailClient,
+    processed_label_id: str,
+    failed_label_id: str,
+) -> bool:
+    subject = get_subject(message).strip().lower()
+
+    if subject != "address data":
+        return False
+
+    message_id = message["id"]
+    body_text = decode_message_body(message)
+
+    if not body_text.strip():
+        print(f"{message_id}: Address Data email had no body text")
+        gmail.mark_failed(message_id, failed_label_id)
+        return True
+
+    csv_path = organize_address_body_to_csv(body_text)
+
+    print(f"{message_id}: Address Organizer created CSV -> {csv_path}")
+
+    gmail.reply_with_attachment(
+        original_message=message,
+        attachment_path=str(csv_path),
+        body_text="Address Organizer finished. Attached is the address data CSV.",
+    )
+
+    gmail.mark_processed_and_archive(
+        message_id,
+        processed_label_id,
+    )
+
+    return True
 
 def main():
     parser = argparse.ArgumentParser()
@@ -442,6 +477,18 @@ def main():
             continue
 
         message = gmail.get_message(message_id)
+
+        handled_address_data = handle_address_data_request(
+            message,
+            gmail,
+            processed_label_id,
+            failed_label_id,
+        )
+
+        if handled_address_data:
+            processed_ids.add(message_id)
+            state.save(processed_ids)
+            continue
 
         handled_historian = handle_historian_request(
             message,
