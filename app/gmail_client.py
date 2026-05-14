@@ -216,8 +216,10 @@ class GmailClient:
         attachment_path: str,
         body_text: str,
         subject: str | None = None,
+        to_override: str | None = None,
     ) -> None:
         to_addr = (
+            to_override
             self._get_header(original_message, "Reply-To")
             or self._get_header(original_message, "From")
         )

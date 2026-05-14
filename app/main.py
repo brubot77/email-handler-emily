@@ -122,6 +122,21 @@ def save_property_state(state: dict) -> None:
         encoding="utf-8",
     )
 
+def extract_reply_to_from_body(body_text: str) -> str | None:
+    patterns = [
+        r"^\s*received\s+from\s*:\s*([^\s,;<>]+@[^\s,;<>]+)",
+        r"^\s*to\s*:\s*([^\s,;<>]+@[^\s,;<>]+)",
+        r"^\s*send\s+to\s*:\s*([^\s,;<>]+@[^\s,;<>]+)",
+        r"^\s*email\s*:\s*([^\s,;<>]+@[^\s,;<>]+)",
+    ]
+
+    for line in (body_text or "").splitlines():
+        for pattern in patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+
+    return None
 
 def decode_message_body(message: dict) -> str:
     payload = message.get("payload", {})
@@ -566,10 +581,19 @@ def main():
         print(f"New Shannon output detected: {new_file}")
 
         for message_id, message in deal_requests.items():
+            body_text = decode_message_body(message)
+            to_override = extract_reply_to_from_body(body_text)
+
+            if to_override:
+                print(f"{message_id}: sending Shannon results to body recipient -> {to_override}")
+            else:
+                print(f"{message_id}: no body recipient found; replying to sender")
+
             gmail.reply_with_attachment(
                 original_message=message,
                 attachment_path=str(new_file),
                 body_text="Deal Analyzer finished. Attached is your results file.",
+                to_override=to_override,
             )
 
             gmail.mark_processed_and_archive(
