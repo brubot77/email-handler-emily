@@ -24,74 +24,151 @@ LINE_ADDRESS_RE = re.compile(
 )
 
 
-FULL_ADDRESS_RE = re.compile(
-    r"""
-    (?P<address>
-        \d{2,6}\s+
-        [A-Za-z0-9 .'\-]+?
-        (?:\s+
-            (?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Pl|Place|
-            Blvd|Boulevard|Ter|Terrace|Way|Cir|Circle)
-        )?
-    )
-    (?:,\s*(?P<city>[A-Za-z .'\-]+))?
-    (?:,\s*(?P<state>KS|Kansas))?
-    (?:\s+(?P<zip>\d{5}))?
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-
 BEDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:bd|bed|beds|bedroom|bedrooms)\b", re.IGNORECASE)
 BATHS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathroom|bathrooms)\b", re.IGNORECASE)
 PRICE_RE = re.compile(r"(?:asking|ask|price|list price)\D{0,20}\$?([\d,]{5,})", re.IGNORECASE)
 
 
-def _clean_address(value: str) -> str:
+def _clean(value: str | None) -> str:
     value = str(value or "").strip()
-    value = value.replace("–", "-").replace("—", "-")
+    value = value.replace("\u00a0", " ")
     value = re.sub(r"\s+", " ", value)
-    value = value.strip(" -;,")
-    return value
+    return value.strip()
 
 
-def _nearby_text(body: str, start: int, end: int, window: int = 300) -> str:
-    return body[max(0, start - window): min(len(body), end + window)]
+def _clean_address(value: str) -> str:
+    value = _clean(value)
+    value = value.replace("–", "-").replace("—", "-")
+    return value.strip(" -;,")
 
 
 def _find_first(pattern: re.Pattern, text: str) -> str:
-    match = pattern.search(text)
+    match = pattern.search(text or "")
     return match.group(1).replace(",", "") if match else ""
 
 
-def organize_address_body_to_csv(body_text: str) -> Path:
+def _normalize_header(value: str) -> str:
+    value = _clean(value).lower()
+    value = value.replace("_", " ")
+    value = re.sub(r"[^a-z0-9 ]", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+
+    aliases = {
+        "address": "Address",
+        "city": "City",
+        "state": "State",
+        "zip": "zip",
+        "zipcode": "zip",
+        "zip code": "zip",
+        "beds": "Beds",
+        "bed": "Beds",
+        "bedrooms": "Beds",
+        "baths": "Baths",
+        "bath": "Baths",
+        "bathrooms": "Baths",
+        "price": "Price",
+        "asking price": "Price",
+        "list price": "Price",
+    }
+
+    return aliases.get(value, value)
+
+
+def _is_markdown_separator(cells: list[str]) -> bool:
+    if not cells:
+        return False
+
+    return all(
+        re.fullmatch(r":?-{3,}:?", _clean(cell)) is not None
+        for cell in cells
+    )
+
+
+def _split_markdown_row(line: str) -> list[str]:
+    line = line.strip()
+
+    if not line.startswith("|") or "|" not in line[1:]:
+        return []
+
+    if line.startswith("|"):
+        line = line[1:]
+
+    if line.endswith("|"):
+        line = line[:-1]
+
+    return [_clean(cell) for cell in line.split("|")]
+
+
+def _parse_markdown_table(body_text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    lines = (body_text or "").splitlines()
+
+    header_map: dict[int, str] | None = None
+
+    for line in lines:
+        cells = _split_markdown_row(line)
+
+        if not cells:
+            continue
+
+        if _is_markdown_separator(cells):
+            continue
+
+        normalized = [_normalize_header(cell) for cell in cells]
+
+        if "Address" in normalized:
+            header_map = {
+                idx: header
+                for idx, header in enumerate(normalized)
+                if header in CSV_HEADERS
+            }
+            continue
+
+        if not header_map:
+            continue
+
+        record = {header: "" for header in CSV_HEADERS}
+
+        for idx, header in header_map.items():
+            if idx < len(cells):
+                record[header] = _clean(cells[idx])
+
+        if not record["Address"]:
+            continue
+
+        record["State"] = record["State"] or "KS"
+
+        rows.append(record)
+
+    return rows
+
+
+def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
 
-    lines = (body_text or "").splitlines()
-
-    for line in lines:
+    for line in (body_text or "").splitlines():
         line = line.strip()
+
         if not line:
             continue
 
         match = LINE_ADDRESS_RE.search(line)
+
         if not match:
             continue
 
         address = _clean_address(match.group("address"))
 
-        # Avoid header lines like "Address - Current Rent..."
         if address.lower().startswith("address"):
             continue
 
         key = address.lower()
+
         if key in seen:
             continue
 
         seen.add(key)
-
-        nearby = line
 
         rows.append(
             {
@@ -99,11 +176,20 @@ def organize_address_body_to_csv(body_text: str) -> Path:
                 "City": "",
                 "State": "KS",
                 "zip": "",
-                "Baths": _find_first(BATHS_RE, nearby),
-                "Beds": _find_first(BEDS_RE, nearby),
-                "Price": _find_first(PRICE_RE, nearby),
+                "Baths": _find_first(BATHS_RE, line),
+                "Beds": _find_first(BEDS_RE, line),
+                "Price": _find_first(PRICE_RE, line),
             }
         )
+
+    return rows
+
+
+def organize_address_body_to_csv(body_text: str) -> Path:
+    rows = _parse_markdown_table(body_text)
+
+    if not rows:
+        rows = _parse_short_address_lines(body_text)
 
     output_dir = Path(tempfile.gettempdir()) / "emily_address_organizer"
     output_dir.mkdir(parents=True, exist_ok=True)
