@@ -434,6 +434,7 @@ def handle_address_data_request(
         original_message=message,
         attachment_path=str(csv_path),
         body_text="Address Organizer finished. Attached is the address data CSV.",
+        subject="run shannon",
     )
 
     gmail.mark_processed_and_archive(
