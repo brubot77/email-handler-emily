@@ -582,12 +582,19 @@ def main():
 
         for message_id, message in deal_requests.items():
             body_text = decode_message_body(message)
+
             to_override = extract_reply_to_from_body(body_text)
 
             if to_override:
                 print(f"{message_id}: sending Shannon results to body recipient -> {to_override}")
             else:
-                print(f"{message_id}: no body recipient found; replying to sender")
+                sender_email = get_sender(message)
+                to_override = sender_email
+
+                print(
+                    f"{message_id}: no 'received from' email found "
+                    f"-> falling back to sender {sender_email}"
+                )
 
             gmail.reply_with_attachment(
                 original_message=message,
