@@ -220,7 +220,7 @@ class GmailClient:
     ) -> None:
         to_addr = (
             to_override
-            self._get_header(original_message, "Reply-To")
+            or self._get_header(original_message, "Reply-To")
             or self._get_header(original_message, "From")
         )
 
