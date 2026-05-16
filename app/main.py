@@ -554,9 +554,11 @@ def main():
 
         for path in saved_paths:
             if path.startswith(DEAL_DIR):
-                print(f"{message_id}: CSV saved for Shannon run")
-                deal_requests[message_id] = message
-
+                print(f"{message_id}: CSV saved for Shannon run -> {path}")
+                deal_requests[message_id] = {
+                    "message": message,
+                    "csv_path": path,
+                }
     if deal_requests:
         print("Triggering Deal Analyzer")
 
@@ -591,27 +593,43 @@ def main():
 
         print(f"New Shannon output detected: {new_file}")
 
-        for message_id, message in deal_requests.items():
+        for message_id, request in deal_requests.items():
+            message = request["message"]
+            csv_path = Path(request["csv_path"])
+
             body_text = decode_message_body(message)
 
-            to_override = extract_reply_to_from_body(body_text)
+            to_addr = extract_reply_to_from_body(body_text)
 
-            if to_override:
-                print(f"{message_id}: sending Shannon results to body recipient -> {to_override}")
+            if to_addr:
+                print(f"{message_id}: sending Shannon results to body recipient -> {to_addr}")
             else:
                 sender_email = get_sender(message)
-                to_override = sender_email
+                to_addr = sender_email
 
                 print(
                     f"{message_id}: no 'received from' email found "
                     f"-> falling back to sender {sender_email}"
                 )
 
-            gmail.reply_with_attachment(
-                original_message=message,
+            run_date = dt.datetime.now().strftime("%d-%b-%Y")
+            csv_file_name = csv_path.name
+
+            outbound_subject = (
+                f"{csv_file_name} {run_date} "
+                f"prelim underwriting data ready for review"
+            )
+
+            gmail.send_email_with_attachment(
+                to_addr=to_addr,
+                subject=outbound_subject,
+                body_text=(
+                    "Preliminary underwriting data is ready for review.\n\n"
+                    f"Source CSV: {csv_file_name}\n"
+                    f"Run date: {run_date}\n\n"
+                    "Attached is the Shannon deal analyzer output."
+                ),
                 attachment_path=str(new_file),
-                body_text="Deal Analyzer finished. Attached is your results file.",
-                to_override=to_override,
             )
 
             gmail.mark_processed_and_archive(

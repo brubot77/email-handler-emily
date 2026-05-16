@@ -283,3 +283,51 @@ class GmailClient:
             )
             .execute()
         )
+
+    def send_email_with_attachment(
+        self,
+        to_addr: str,
+        subject: str,
+        body_text: str,
+        attachment_path: str,
+    ) -> None:
+        msg = EmailMessage()
+        msg["To"] = to_addr
+        msg["Subject"] = subject
+
+        msg.set_content(body_text)
+
+        file_path = Path(attachment_path)
+        data = file_path.read_bytes()
+
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+
+        if mime_type:
+            maintype, subtype = mime_type.split("/", 1)
+        else:
+            maintype, subtype = "application", "octet-stream"
+
+        msg.add_attachment(
+            data,
+            maintype=maintype,
+            subtype=subtype,
+            filename=file_path.name,
+        )
+
+        raw = base64.urlsafe_b64encode(
+            msg.as_bytes()
+        ).decode("utf-8")
+
+        body = {
+            "raw": raw,
+        }
+
+        (
+            self.service.users()
+            .messages()
+            .send(
+                userId="me",
+                body=body,
+            )
+            .execute()
+        )
