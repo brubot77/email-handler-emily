@@ -18,6 +18,7 @@ from app.processor import (
 from app.state_store import StateStore
 from app.address_organizer import organize_address_body_to_csv
 
+
 PROPERTY_STATE_PATH = Path("/home/brubot77/.openclaw/workspace/shannon/property_state.json")
 MONTHLY_DIR = "/home/brubot77/Monthly-Analyzer/input"
 DEAL_DIR = "/home/brubot77/.openclaw/workspace/shannon/Input"
@@ -122,6 +123,7 @@ def save_property_state(state: dict) -> None:
         encoding="utf-8",
     )
 
+
 def extract_reply_to_from_body(body_text: str) -> str | None:
     patterns = [
         r"^\s*received\s+from\s*:\s*([^\s,;<>]+@[^\s,;<>]+)",
@@ -137,6 +139,7 @@ def extract_reply_to_from_body(body_text: str) -> str | None:
                 return match.group(1).strip()
 
     return None
+
 
 def decode_message_body(message: dict) -> str:
     payload = message.get("payload", {})
@@ -275,44 +278,93 @@ def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
     return updates
 
 
-def handle_address_data_request(
+def handle_address_update_request(
     message: dict,
+    sender: str,
     gmail: GmailClient,
     processed_label_id: str,
     failed_label_id: str,
 ) -> bool:
     subject = get_subject(message).strip().lower()
 
-    if subject != "address data":
+    if subject != "update address":
         return False
 
     message_id = message["id"]
     body_text = decode_message_body(message)
+    parsed_updates = parse_address_update_body(body_text)
 
-    if not body_text.strip():
-        print(f"{message_id}: Address Data email had no body text")
+    if not parsed_updates:
         gmail.mark_failed(message_id, failed_label_id)
+        print(f"{message_id}: update address email contained no valid update blocks")
         return True
 
-    csv_path = organize_address_body_to_csv(body_text)
+    now = dt.datetime.now(dt.UTC).isoformat()
+    property_state = load_property_state()
 
-    original_sender = get_sender(message)
+    updated_count = 0
 
-    print(f"{message_id}: Address Organizer created CSV -> {csv_path}")
-    print(f"{message_id}: forwarding run shannon CSV to bru.bot77@gmail.com; received from={original_sender}")
+    for parsed in parsed_updates:
+        address = parsed.get("address", "")
+        new_status = parsed.get("status", "")
+        new_zest_rent = parsed.get("zest_rent", "")
+        new_note = parsed.get("notes", "")
 
-    gmail.reply_with_attachment(
-        original_message=message,
-        attachment_path=str(csv_path),
-        body_text=f"received from: {original_sender}",
-        subject="run shannon",
-        to_override="bru.bot77@gmail.com",
-    )
+        if not address:
+            print(f"{message_id}: skipping update block with missing address")
+            continue
+
+        property_key = canonical_property_key(address)
+        state_entry = property_state.get(property_key)
+
+        if state_entry is None:
+            state_entry = {
+                "display_address": address,
+                "status": "Under Review",
+                "zest_rent": "",
+                "notes_history": [],
+                "first_seen_utc": now,
+                "last_seen_utc": now,
+            }
+
+            property_state[property_key] = state_entry
+
+        state_entry["display_address"] = address
+        state_entry["last_seen_utc"] = now
+        state_entry.setdefault("status", "Under Review")
+        state_entry.setdefault("zest_rent", "")
+        state_entry.setdefault("notes_history", [])
+
+        if new_status:
+            state_entry["status"] = new_status
+
+        if new_zest_rent:
+            state_entry["zest_rent"] = new_zest_rent
+
+        if new_note:
+            state_entry["notes_history"].append(
+                {
+                    "timestamp_utc": now,
+                    "sender": sender,
+                    "note": new_note,
+                }
+            )
+
+        updated_count += 1
+
+    if updated_count == 0:
+        gmail.mark_failed(message_id, failed_label_id)
+        print(f"{message_id}: no usable update blocks found in Update Address email")
+        return True
+
+    save_property_state(property_state)
 
     gmail.mark_processed_and_archive(
         message_id,
         processed_label_id,
     )
+
+    print(f"{message_id}: updated {updated_count} property record(s) from Update Address email")
 
     return True
 
@@ -373,6 +425,7 @@ def handle_historian_request(
 
     return True
 
+
 def handle_address_data_request(
     message: dict,
     gmail: GmailClient,
@@ -415,6 +468,7 @@ def handle_address_data_request(
     )
 
     return True
+
 
 def main():
     parser = argparse.ArgumentParser()
