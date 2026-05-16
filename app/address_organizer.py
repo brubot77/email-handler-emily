@@ -26,7 +26,10 @@ LINE_ADDRESS_RE = re.compile(
 
 BEDS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:bd|bed|beds|bedroom|bedrooms)\b", re.IGNORECASE)
 BATHS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:ba|bath|baths|bathroom|bathrooms)\b", re.IGNORECASE)
-PRICE_RE = re.compile(r"(?:asking|ask|price|list price)\D{0,20}\$?([\d,]{5,})", re.IGNORECASE)
+PRICE_RE = re.compile(
+    r"(?:asking|ask|price|list price)?\D{0,20}\$([\d,]{5,})",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: str | None) -> str:
@@ -147,14 +150,19 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
 
+    city_re = re.compile(
+        r"\b(Wichita|Andover|Bel Aire|Bentley|Clearwater|Colwich|Derby|Eastborough|Garden Plain|Goddard|Haysville|Kechi|Maize|Mount Hope|Mulvane|Park City|Valley Center|Viola|Newton|Hesston|Halstead|Burrton|North Newton|Sedgwick|Walton)\b",
+        re.IGNORECASE,
+    )
+
+    zip_re = re.compile(r"\b(67\d{3})\b")
+
     for line in (body_text or "").splitlines():
         line = line.strip()
-
         if not line:
             continue
 
         match = LINE_ADDRESS_RE.search(line)
-
         if not match:
             continue
 
@@ -164,18 +172,23 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
             continue
 
         key = address.lower()
-
         if key in seen:
             continue
 
         seen.add(key)
 
+        city_match = city_re.search(line)
+        zip_match = zip_re.search(line)
+
+        city = _clean(city_match.group(1)) if city_match else ""
+        zip_code = _clean(zip_match.group(1)) if zip_match else ""
+
         rows.append(
             {
                 "Address": address,
-                "City": "",
+                "City": city,
                 "State": "KS",
-                "zip": "",
+                "zip": zip_code,
                 "Baths": _find_first(BATHS_RE, line),
                 "Beds": _find_first(BEDS_RE, line),
                 "Price": _find_first(PRICE_RE, line),
