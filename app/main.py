@@ -393,14 +393,20 @@ def handle_address_data_request(
         return True
 
     csv_path = organize_address_body_to_csv(body_text)
+    original_sender = get_sender(message)
 
     print(f"{message_id}: Address Organizer created CSV -> {csv_path}")
+    print(
+        f"{message_id}: forwarding run shannon CSV to bru.bot77@gmail.com "
+        f"with received from={original_sender}"
+    )
 
     gmail.reply_with_attachment(
         original_message=message,
         attachment_path=str(csv_path),
-        body_text="Address Organizer finished. Attached is the address data CSV.",
+        body_text=f"received from: {original_sender}",
         subject="run shannon",
+        to_override="bru.bot77@gmail.com",
     )
 
     gmail.mark_processed_and_archive(
