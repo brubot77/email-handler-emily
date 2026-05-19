@@ -16,9 +16,25 @@ LINE_ADDRESS_RE = re.compile(
         \d{2,6}
         \s+
         [A-Za-z0-9 .'\-]+?
+        \s+
+        (?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|
+           Cir|Circle|Blvd|Boulevard|Pl|Place|Ter|Terrace|
+           Trl|Trail|Way|Pkwy|Parkway)
+        \.?
     )
-    \s*
-    (?:[-–—]\s*|$)
+    (?:
+        \s*,\s*
+        (?P<city>[A-Za-z .'\-]+)
+    )?
+    (?:
+        \s*,\s*
+        (?P<state>[A-Za-z]{2})
+    )?
+    (?:
+        \s+
+        (?P<zip>67\d{3})
+    )?
+    \s*$
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -177,12 +193,13 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
 
         seen.add(key)
 
-        city_match = city_re.search(line)
-        zip_match = zip_re.search(line)
+        city = _clean(match.group("city")) if match.group("city") else ""
+        zip_code = _clean(match.group("zip")) if match.group("zip") else ""
 
-        city = _clean(city_match.group(1)) if city_match else ""
-        zip_code = _clean(zip_match.group(1)) if zip_match else ""
-
+        if not city:
+            city_match = city_re.search(line)
+            city = _clean(city_match.group(1)) if city_match else ""
+        
         rows.append(
             {
                 "Address": address,
