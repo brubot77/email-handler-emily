@@ -559,6 +559,17 @@ def main():
                     "message": message,
                     "csv_path": path,
                 }
+
+        if saved_paths and message_id not in deal_requests:
+            gmail.mark_processed_and_archive(
+                message_id,
+                processed_label_id,
+            )
+
+            processed_ids.add(message_id)
+            state.save(processed_ids)
+
+            print(f"{message_id}: saved attachment(s), marked processed")
     if deal_requests:
         print("Triggering Deal Analyzer")
 
