@@ -70,38 +70,74 @@ def canonical_property_key(
     state: str | None = "",
     zip_code: str | None = "",
 ) -> str:
-    parts = [
-        str(address or "").strip().lower(),
-        str(city or "").strip().lower(),
-        str(state or "").strip().lower(),
-        str(zip_code or "").strip()[:5],
-    ]
+    """
+    Street-only canonical key for property_state.json.
 
-    text = " ".join(p for p in parts if p)
+    City/state/ZIP intentionally do not matter.
+    Street suffixes are removed so these all match:
+      1317 N Madison
+      1317 N Madison St
+      1317 N Madison Ave.
+      1317 N Madison, Wichita, KS 67214
 
+    Result:
+      1317 n madison
+    """
+
+    text = str(address or "").strip().lower()
+
+    # If city/state are included after commas, keep only street portion.
+    if "," in text:
+        text = text.split(",", 1)[0]
+
+    # Cut off accidentally swallowed labeled fields.
+    text = re.split(r"\bstatus\s*:|\bzest rent\s*:|\bnotes\s*:", text, flags=re.IGNORECASE)[0]
+
+    # Remove city/state/ZIP noise if typed without commas.
+    text = re.sub(r"\bwichita\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", text)
+
+    # Remove punctuation.
     text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\b(apartment|apt|unit|ste|suite|#)\s*\w+\b", " ", text)
+
+    # Remove unit/apartment info.
+    text = re.sub(r"\b(apartment|apt|unit|ste|suite)\s+\w+\b", " ", text)
 
     replacements = {
-        "street": "st",
-        "avenue": "ave",
-        "road": "rd",
-        "drive": "dr",
-        "lane": "ln",
-        "court": "ct",
-        "place": "pl",
-        "boulevard": "blvd",
-        "terrace": "ter",
-        "parkway": "pkwy",
         "north": "n",
         "south": "s",
         "east": "e",
         "west": "w",
     }
 
-    words = [replacements.get(word, word) for word in text.split()]
-    text = " ".join(words)
+    street_suffixes = {
+        "street", "st",
+        "avenue", "ave",
+        "road", "rd",
+        "drive", "dr",
+        "lane", "ln",
+        "court", "ct",
+        "place", "pl",
+        "boulevard", "blvd",
+        "terrace", "ter",
+        "parkway", "pkwy",
+        "circle", "cir",
+        "trail", "trl",
+        "way",
+    }
 
+    words = []
+
+    for word in text.split():
+        word = replacements.get(word, word)
+
+        if word in street_suffixes:
+            continue
+
+        words.append(word)
+
+    text = " ".join(words)
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
@@ -176,106 +212,73 @@ def decode_message_body(message: dict) -> str:
 
 
 def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
-    updates: list[dict[str, str]] = []
-    current: dict[str, list[str]] | None = None
-    current_field: str | None = None
+    """
+    Parses one or more Update Address blocks.
 
-    def finalize_current() -> None:
-        nonlocal current
+    Required:
+      Address:
 
-        if not current:
-            return
+    Optional:
+      Status:
+      Zest Rent:
+      Notes:
 
-        address = " ".join(current.get("address", [])).strip()
-        status = " ".join(current.get("status", [])).strip()
-        zest_rent = " ".join(current.get("zest_rent", [])).strip()
-        notes = "\n".join(current.get("notes", [])).strip()
+    City/state are not required and are ignored for matching.
+    """
 
-        if address or status or zest_rent or notes:
-            updates.append(
-                {
-                    "address": address,
-                    "status": status,
-                    "zest_rent": zest_rent,
-                    "notes": notes,
-                }
-            )
+    text = (body_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
-        current = None
+    if not text:
+        return []
 
-    for raw_line in body_text.splitlines():
-        line = raw_line.strip()
+    label_re = re.compile(
+        r"(?im)^(address|status update|status|zest rent|notes)\s*:\s*"
+    )
 
-        if not line:
-            continue
+    matches = list(label_re.finditer(text))
 
-        lower = line.lower()
+    if not matches:
+        return []
 
-        if lower.startswith("address:"):
-            if current is not None:
-                finalize_current()
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+
+    for i, match in enumerate(matches):
+        label = match.group(1).lower().strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+
+        value = text[start:end].strip()
+        value = re.sub(r"\n+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+
+        if label == "address":
+            if current and current.get("address"):
+                blocks.append(current)
 
             current = {
-                "address": [],
-                "status": [],
-                "zest_rent": [],
-                "notes": [],
+                "address": value,
+                "status": "",
+                "zest_rent": "",
+                "notes": "",
             }
-
-            current_field = "address"
-
-            value = line.split(":", 1)[1].strip()
-
-            if value:
-                current["address"].append(value)
 
             continue
 
         if current is None:
             continue
 
-        if lower.startswith("status update:"):
-            current_field = "status"
-            value = line.split(":", 1)[1].strip()
+        if label in {"status", "status update"}:
+            current["status"] = value
+        elif label == "zest rent":
+            current["zest_rent"] = value
+        elif label == "notes":
+            current["notes"] = value
 
-            if value:
-                current["status"].append(value)
+    if current and current.get("address"):
+        blocks.append(current)
 
-            continue
-
-        if lower.startswith("status:"):
-            current_field = "status"
-            value = line.split(":", 1)[1].strip()
-
-            if value:
-                current["status"].append(value)
-
-            continue
-
-        if lower.startswith("zest rent:"):
-            current_field = "zest_rent"
-            value = line.split(":", 1)[1].strip()
-
-            if value:
-                current["zest_rent"].append(value)
-
-            continue
-
-        if lower.startswith("notes:"):
-            current_field = "notes"
-            value = line.split(":", 1)[1].strip()
-
-            if value:
-                current["notes"].append(value)
-
-            continue
-
-        if current_field:
-            current[current_field].append(line)
-
-    finalize_current()
-
-    return updates
+    return blocks
 
 
 def handle_address_update_request(
@@ -329,7 +332,7 @@ def handle_address_update_request(
 
             property_state[property_key] = state_entry
 
-        state_entry["display_address"] = address
+        state_entry["display_address"] = address.split(",", 1)[0].strip()
         state_entry["last_seen_utc"] = now
         state_entry.setdefault("status", "Under Review")
         state_entry.setdefault("zest_rent", "")
