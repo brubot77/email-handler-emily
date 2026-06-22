@@ -5,6 +5,7 @@ import base64
 import datetime as dt
 import json
 import re
+import csv
 import subprocess
 import time
 from pathlib import Path
@@ -606,6 +607,15 @@ def handle_address_data_request(
         return True
 
     csv_path = organize_address_body_to_csv(body_text)
+    
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        print(f"{message_id}: Address Data created CSV but found no address rows")
+        gmail.mark_failed(message_id, failed_label_id)
+        return True 
+    
     original_sender = get_sender(message)
 
     print(f"{message_id}: Address Organizer created CSV -> {csv_path}")

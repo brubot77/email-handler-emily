@@ -8,6 +8,28 @@ from pathlib import Path
 
 CSV_HEADERS = ["Address", "City", "State", "zip", "Baths", "Beds", "Price"]
 
+def clean_address_body_for_parsing(body_text: str) -> str:
+    cleaned_lines = []
+
+    for raw_line in str(body_text or "").splitlines():
+        line = raw_line.strip()
+
+        if not line:
+            continue
+
+        # Drop quoted-email junk.
+        if line.startswith(">"):
+            continue
+
+        if line.lower().startswith("on ") and " wrote:" in line.lower():
+            continue
+
+        # Normalize state names.
+        line = re.sub(r"\bKansas\b", "KS", line, flags=re.IGNORECASE)
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines)
 
 LINE_ADDRESS_RE = re.compile(
     r"""
@@ -16,11 +38,13 @@ LINE_ADDRESS_RE = re.compile(
         \d{2,6}
         \s+
         [A-Za-z0-9 .'\-]+?
+    (?:
         \s+
         (?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|
-           Cir|Circle|Blvd|Boulevard|Pl|Place|Ter|Terrace|
-           Trl|Trail|Way|Pkwy|Parkway)
+        Cir|Circle|Blvd|Boulevard|Pl|Place|Ter|Terrace|
+        Trl|Trail|Way|Pkwy|Parkway)
         \.?
+    )?
     )
     (?:
         \s*,\s*
@@ -178,6 +202,8 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
         if not line:
             continue
 
+        line = re.sub(r"^\s*address\s*:\s*", "", line, flags=re.IGNORECASE).strip()
+
         match = LINE_ADDRESS_RE.search(line)
         if not match:
             continue
@@ -216,6 +242,8 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
 
 
 def organize_address_body_to_csv(body_text: str) -> Path:
+    body_text = clean_address_body_for_parsing(body_text)
+
     rows = _parse_markdown_table(body_text)
 
     if not rows:
