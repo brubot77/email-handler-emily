@@ -9,6 +9,9 @@ import subprocess
 import time
 from pathlib import Path
 
+GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
+GOOGLE_DRIVE_ROOT_FOLDER_ID = "1kbUI4CrAXDMeE4mjj8pMJ_GrM488QEIa"
+
 from app.config import load_settings
 from app.gmail_client import GmailClient, get_subject, get_sender
 from app.processor import (
@@ -62,6 +65,38 @@ def newest_output_after(before_snapshot):
             return file
 
     return None
+
+def save_file_to_google_drive(file_path: Path) -> bool:
+    cmd = [
+        "rclone",
+        "copy",
+        str(file_path),
+        GOOGLE_DRIVE_REMOTE_DIR,
+        "--drive-root-folder-id",
+        GOOGLE_DRIVE_ROOT_FOLDER_ID,
+    ]
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.stdout:
+        print(result.stdout)
+
+    if result.stderr:
+        print(result.stderr)
+
+    if result.returncode != 0:
+        print(f"Google Drive upload failed for {file_path}")
+        return False
+
+    print(
+        f"Saved Shannon output to Google Drive: "
+        f"{GOOGLE_DRIVE_REMOTE_DIR}/{file_path.name}"
+    )
+    return True
 
 
 def canonical_property_key(
@@ -634,17 +669,14 @@ def main():
                 f"prelim underwriting data ready for review"
             )
 
-            gmail.send_email_with_attachment(
-                to_addr=to_addr,
-                subject=outbound_subject,
-                body_text=(
-                    "Preliminary underwriting data is ready for review.\n\n"
-                    f"Source CSV: {csv_file_name}\n"
-                    f"Run date: {run_date}\n\n"
-                    "Attached is the Shannon deal analyzer output."
-                ),
-                attachment_path=str(new_file),
-            )
+            uploaded = save_file_to_google_drive(new_file)
+
+            if not uploaded:
+                gmail.mark_failed(message_id, failed_label_id)
+                print(f"{message_id}: failed to save Shannon output to Google Drive")
+                continue
+
+            print(f"{message_id}: Shannon output saved to Google Drive -> {new_file.name}")
 
             gmail.mark_processed_and_archive(
                 message_id,
