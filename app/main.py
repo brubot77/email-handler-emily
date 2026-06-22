@@ -8,6 +8,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from openpyxl import load_workbook
 
 GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
 GOOGLE_DRIVE_ROOT_FOLDER_ID = "1kbUI4CrAXDMeE4mjj8pMJ_GrM488QEIa"
@@ -66,12 +67,136 @@ def newest_output_after(before_snapshot):
 
     return None
 
+def normalize_address_for_filename(address: str) -> str:
+    """
+    Convert first output address into a safe file-name prefix.
+
+    Examples:
+      1317 N Madison St, Wichita, KS -> 1317_N_Madison
+      1317 N Madison Ave. -> 1317_N_Madison
+    """
+
+    text = str(address or "").strip()
+
+    # Keep only street part before city/state.
+    if "," in text:
+        text = text.split(",", 1)[0].strip()
+
+    text = text.replace("\u00a0", " ")
+
+    # Remove punctuation.
+    text = re.sub(r"[^A-Za-z0-9\s]", " ", text)
+
+    # Remove city/state/zip noise if accidentally included.
+    text = re.sub(r"\bwichita\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", text)
+
+    direction_replacements = {
+        "north": "N",
+        "south": "S",
+        "east": "E",
+        "west": "W",
+    }
+
+    street_suffixes = {
+        "street", "st",
+        "avenue", "ave",
+        "road", "rd",
+        "drive", "dr",
+        "lane", "ln",
+        "court", "ct",
+        "place", "pl",
+        "boulevard", "blvd",
+        "terrace", "ter",
+        "parkway", "pkwy",
+        "circle", "cir",
+        "trail", "trl",
+        "way",
+    }
+
+    words = []
+
+    for word in text.split():
+        lower_word = word.lower().strip()
+
+        if lower_word in street_suffixes:
+            continue
+
+        if lower_word in direction_replacements:
+            words.append(direction_replacements[lower_word])
+        else:
+            words.append(word)
+
+    safe = "_".join(words)
+    safe = re.sub(r"_+", "_", safe).strip("_")
+
+    return safe or "Shannon_Output"
+
+
+def first_address_from_output_workbook(file_path: Path) -> str:
+    """
+    Read the first Address value from the Shannon output workbook.
+    Shannon writes headers around row 15, but this searches flexibly.
+    """
+
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+
+    try:
+        ws = wb.active
+
+        address_col = None
+        header_row = None
+
+        # Search first 40 rows for Address header.
+        for row in ws.iter_rows(min_row=1, max_row=40):
+            for cell in row:
+                if str(cell.value or "").strip().lower() == "address":
+                    address_col = cell.column
+                    header_row = cell.row
+                    break
+
+            if address_col and header_row:
+                break
+
+        if not address_col or not header_row:
+            return ""
+
+        # First non-empty Address value after the header.
+        for row_num in range(header_row + 1, ws.max_row + 1):
+            value = ws.cell(row=row_num, column=address_col).value
+            value = str(value or "").strip()
+
+            if value:
+                return value
+
+        return ""
+
+    finally:
+        wb.close()
+
+
+def drive_filename_for_shannon_output(file_path: Path) -> str:
+    first_address = first_address_from_output_workbook(file_path)
+    address_prefix = normalize_address_for_filename(first_address)
+
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    return f"{address_prefix}_{stamp}.xlsx"
+
 def save_file_to_google_drive(file_path: Path) -> bool:
+    drive_file_name = drive_filename_for_shannon_output(file_path)
+
+    remote_path = (
+        f"{GOOGLE_DRIVE_REMOTE_DIR.rstrip('/')}/"
+        f"{drive_file_name}"
+    )
+
     cmd = [
         "rclone",
-        "copy",
+        "copyto",
         str(file_path),
-        GOOGLE_DRIVE_REMOTE_DIR,
+        remote_path,
         "--drive-root-folder-id",
         GOOGLE_DRIVE_ROOT_FOLDER_ID,
     ]
@@ -92,10 +217,7 @@ def save_file_to_google_drive(file_path: Path) -> bool:
         print(f"Google Drive upload failed for {file_path}")
         return False
 
-    print(
-        f"Saved Shannon output to Google Drive: "
-        f"{GOOGLE_DRIVE_REMOTE_DIR}/{file_path.name}"
-    )
+    print(f"Saved Shannon output to Google Drive: {remote_path}")
     return True
 
 
