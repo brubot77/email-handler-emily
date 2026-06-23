@@ -25,7 +25,18 @@ REFI_LOG_HEADERS = [
     "Lender",
     "Settlement Date",
     "New Loan Amount",
-    "Total Debits / Closing Costs",
+    "Loan Origination Fee",
+    "Loan Document Fee",
+    "Appraisal Fee",
+    "Flood Certification",
+    "Loan Policy",
+    "Loan Policy Credit",
+    "Closing Fee",
+    "Overnight Delivery Fee",
+    "Record Mortgage",
+    "Record Assignment of Rents",
+    "SubTotal Debits",
+    "SubTotal Credits",
     "Due to Borrower",
     "Escrow/File No",
     "Message ID",
@@ -53,12 +64,12 @@ def iter_message_parts(payload: dict):
         yield from iter_message_parts(part)
 
 
-def save_refi_pdf_attachments(message: dict, gmail) -> list[Path]:
+def save_refi_pdf_attachments(message: dict, gmail) -> list[tuple[Path, str]]:
     """
     Save PDF attachments from a Gmail message to a temp folder.
     """
 
-    saved: list[Path] = []
+    saved: list[tuple[Path, str]] = []
     message_id = message["id"]
     payload = message.get("payload", {})
 
@@ -98,7 +109,7 @@ def save_refi_pdf_attachments(message: dict, gmail) -> list[Path]:
         safe_name = sanitize_filename(filename)
         output_path = temp_dir / f"{message_id}_{safe_name}"
         output_path.write_bytes(content)
-        saved.append(output_path)
+        saved.append((output_path, filename))
 
     return saved
 
@@ -132,6 +143,58 @@ def money_after_label(text: str, label: str) -> str:
 
     return match.group(1) if match else ""
 
+def normalize_money(value: str) -> str:
+    value = str(value or "").strip()
+    match = re.search(r"\$[\d,]+\.\d{2}", value)
+    return match.group(0) if match else ""
+
+
+def extract_all_money_values(text: str) -> dict[str, str]:
+    """
+    Extracts refi dollar values from ALTA-style settlement statements.
+    """
+
+    values = {
+        "new_loan_amount": money_after_label(text, "New Loan Amount"),
+        "loan_origination_fee": money_after_label(text, "Loan Origination Fee"),
+        "loan_document_fee": money_after_label(text, "Loan Document Fee"),
+        "appraisal_fee": money_after_label(text, "Appraisal Fee"),
+        "flood_certification": money_after_label(text, "Flood Certification"),
+        "loan_policy": "",
+        "loan_policy_credit": money_after_label(text, "Loan Policy Credit"),
+        "closing_fee": money_after_label(text, "Closing Fee"),
+        "overnight_delivery_fee": money_after_label(text, "Overnight Delivery Fee"),
+        "record_mortgage": money_after_label(text, "Record Mortgage"),
+        "record_assignment_of_rents": money_after_label(text, "Record Assignment of Rents"),
+        "subtotal_debits": "",
+        "subtotal_credits": "",
+        "due_to_borrower": money_after_label(text, "Due to Buyer/Borrower"),
+    }
+
+    # Loan Policy line often includes the policy amount first and the fee second:
+    # "Loan Policy $385,600.00 $1,618.00"
+    loan_policy_match = re.search(
+        r"Loan Policy\s+\$[\d,]+\.\d{2}\s+(\$[\d,]+\.\d{2})",
+        text,
+        re.IGNORECASE,
+    )
+    if loan_policy_match:
+        values["loan_policy"] = loan_policy_match.group(1)
+    else:
+        values["loan_policy"] = money_after_label(text, "Loan Policy")
+
+    # SubTotals line usually has debit and credit:
+    # "SubTotals $8,991.00 $386,004.00"
+    subtotal_match = re.search(
+        r"SubTotals\s+(\$[\d,]+\.\d{2})\s+(\$[\d,]+\.\d{2})",
+        text,
+        re.IGNORECASE,
+    )
+    if subtotal_match:
+        values["subtotal_debits"] = subtotal_match.group(1)
+        values["subtotal_credits"] = subtotal_match.group(2)
+
+    return values
 
 def detect_llc(text: str) -> str:
     lower = text.lower()
@@ -205,16 +268,16 @@ def extract_refi_info(pdf_path: Path) -> dict:
     llc = detect_llc(text)
     addresses = extract_property_addresses(text)
 
+    money_values = extract_all_money_values(text)
+
     return {
         "llc": llc,
         "addresses": addresses,
         "lender": extract_line_value(text, "Lender"),
         "settlement_date": extract_line_value(text, "Settlement Date"),
-        "new_loan_amount": money_after_label(text, "New Loan Amount"),
-        "total_debits": "",
-        "due_to_borrower": money_after_label(text, "Due to Buyer/Borrower"),
         "escrow_no": escrow_no,
         "text": text,
+        **money_values,
     }
 
 
@@ -252,6 +315,47 @@ def ensure_refi_log() -> None:
     ws.append(REFI_LOG_HEADERS)
     wb.save(REFI_LOG_PATH)
 
+def normalize_duplicate_key(value: str) -> str:
+    value = str(value or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    return value
+
+
+def existing_refi_log_keys(ws) -> set[tuple[str, str]]:
+    """
+    Returns existing duplicate keys:
+      (Original Filename, Property Address)
+    """
+
+    keys: set[tuple[str, str]] = set()
+
+    header_row = [cell.value for cell in ws[1]]
+    header_map = {
+        str(header or "").strip(): idx + 1
+        for idx, header in enumerate(header_row)
+    }
+
+    original_col = header_map.get("Original Filename")
+    address_col = header_map.get("Property Address")
+
+    if not original_col or not address_col:
+        return keys
+
+    for row in range(2, ws.max_row + 1):
+        original_filename = ws.cell(row=row, column=original_col).value
+        property_address = ws.cell(row=row, column=address_col).value
+
+        if not original_filename or not property_address:
+            continue
+
+        keys.add(
+            (
+                normalize_duplicate_key(original_filename),
+                normalize_duplicate_key(property_address),
+            )
+        )
+
+    return keys
 
 def append_refi_log_rows(
     info: dict,
@@ -259,16 +363,36 @@ def append_refi_log_rows(
     original_filename: str,
     message_id: str,
     sender: str,
-) -> None:
+) -> int:
+    """
+    Append one row per property address.
+
+    Avoid duplicate rows when the same:
+      Original Filename + Property Address
+    already exists.
+    """
+
     ensure_refi_log()
 
     wb = load_workbook(REFI_LOG_PATH)
     ws = wb["Refi Log"]
 
+    existing_keys = existing_refi_log_keys(ws)
+
     received_utc = dt.datetime.now(dt.UTC).isoformat()
     addresses = info.get("addresses") or []
 
+    added_count = 0
+
     for address in addresses:
+        duplicate_key = (
+            normalize_duplicate_key(original_filename),
+            normalize_duplicate_key(address),
+        )
+
+        if duplicate_key in existing_keys:
+            continue
+
         ws.append(
             [
                 received_utc,
@@ -279,7 +403,18 @@ def append_refi_log_rows(
                 info.get("lender", ""),
                 info.get("settlement_date", ""),
                 info.get("new_loan_amount", ""),
-                info.get("total_debits", ""),
+                info.get("loan_origination_fee", ""),
+                info.get("loan_document_fee", ""),
+                info.get("appraisal_fee", ""),
+                info.get("flood_certification", ""),
+                info.get("loan_policy", ""),
+                info.get("loan_policy_credit", ""),
+                info.get("closing_fee", ""),
+                info.get("overnight_delivery_fee", ""),
+                info.get("record_mortgage", ""),
+                info.get("record_assignment_of_rents", ""),
+                info.get("subtotal_debits", ""),
+                info.get("subtotal_credits", ""),
                 info.get("due_to_borrower", ""),
                 info.get("escrow_no", ""),
                 message_id,
@@ -287,7 +422,11 @@ def append_refi_log_rows(
             ]
         )
 
+        existing_keys.add(duplicate_key)
+        added_count += 1
+
     wb.save(REFI_LOG_PATH)
+    return added_count
 
 
 def process_refi_message(message: dict, gmail, sender: str) -> tuple[bool, str]:
@@ -306,7 +445,9 @@ def process_refi_message(message: dict, gmail, sender: str) -> tuple[bool, str]:
 
     processed_count = 0
 
-    for pdf_path in pdfs:
+    total_rows_added = 0
+
+    for pdf_path, original_filename in pdfs:
         info = extract_refi_info(pdf_path)
 
         if not info.get("addresses"):
@@ -318,19 +459,21 @@ def process_refi_message(message: dict, gmail, sender: str) -> tuple[bool, str]:
         destination_dir = refi_destination_for_llc(info["llc"])
         destination_dir.mkdir(parents=True, exist_ok=True)
 
-        stored_name = create_stored_refi_filename(info, pdf_path.name)
+        stored_name = create_stored_refi_filename(info, original_filename)
         stored_path = destination_dir / stored_name
 
         shutil.copy2(pdf_path, stored_path)
 
-        append_refi_log_rows(
+        rows_added = append_refi_log_rows(
             info=info,
             stored_path=stored_path,
-            original_filename=pdf_path.name,
+            original_filename=original_filename,
             message_id=message_id,
             sender=sender,
         )
 
+        total_rows_added += rows_added
+
         processed_count += 1
 
-    return True, f"Processed {processed_count} refi PDF(s)"
+    return True, f"Processed {processed_count} refi PDF(s), added {total_rows_added} log row(s)"
