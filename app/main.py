@@ -10,6 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from openpyxl import load_workbook
+from app.refi_processor import process_refi_message
 
 GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
 GOOGLE_DRIVE_ROOT_FOLDER_ID = "1kbUI4CrAXDMeE4mjj8pMJ_GrM488QEIa"
@@ -30,6 +31,39 @@ DEAL_DIR = "/home/brubot77/.openclaw/workspace/shannon/Input"
 DEAL_OUTPUT_DIR = "/home/brubot77/.openclaw/workspace/shannon/Output"
 MONTHLY_OUTPUT_DIR = Path("/home/brubot77/Monthly-Analyzer/output")
 
+def handle_refi_request(
+    message: dict,
+    gmail: GmailClient,
+    processed_label_id: str,
+    failed_label_id: str,
+) -> bool:
+    subject = get_subject(message).strip().lower()
+
+    if subject != "refi":
+        return False
+
+    message_id = message["id"]
+    sender = get_sender(message)
+
+    success, detail = process_refi_message(
+        message=message,
+        gmail=gmail,
+        sender=sender,
+    )
+
+    if not success:
+        print(f"{message_id}: Refi failed -> {detail}")
+        gmail.mark_failed(message_id, failed_label_id)
+        return True
+
+    print(f"{message_id}: Refi processed -> {detail}")
+
+    gmail.mark_processed_and_archive(
+        message_id,
+        processed_label_id,
+    )
+
+    return True
 
 def trigger_deal_analyzer():
     cmd = (
@@ -674,6 +708,18 @@ def main():
             continue
 
         message = gmail.get_message(message_id)
+
+        handled_refi = handle_refi_request(
+            message,
+            gmail,
+            processed_label_id,
+            failed_label_id,
+        )
+
+        if handled_refi:
+            processed_ids.add(message_id)
+            state.save(processed_ids)
+            continue
 
         handled_address_data = handle_address_data_request(
             message,
