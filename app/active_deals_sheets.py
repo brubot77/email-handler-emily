@@ -808,6 +808,220 @@ def _format_cell(
         },
     ).execute()
 
+def _find_header_columns_in_values(values: list[list[Any]]) -> dict[str, int]:
+    """
+    Find Shannon header row and return normalized header -> 1-based column index.
+    Shannon individual tabs typically have the main headers on row 15.
+    """
+
+    for row in values:
+        normalized = [_norm(value) for value in row]
+
+        if "address" in normalized and "zestrent" in normalized:
+            headers: dict[str, int] = {}
+
+            for col_idx, raw_header in enumerate(row, start=1):
+                key = _norm(raw_header)
+
+                if key:
+                    headers[key] = col_idx
+
+            return headers
+
+    return {}
+
+
+def _format_column(
+    sheets,
+    spreadsheet_id: str,
+    sheet_id: int,
+    col_1based: int,
+    number_format_type: str,
+    pattern: str,
+) -> None:
+    sheets.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1000,
+                            "startColumnIndex": col_1based - 1,
+                            "endColumnIndex": col_1based,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": number_format_type,
+                                    "pattern": pattern,
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+
+def _hide_column(
+    sheets,
+    spreadsheet_id: str,
+    sheet_id: int,
+    col_1based: int,
+) -> None:
+    """
+    Hide a column in Google Sheets.
+
+    Never hide A or B.
+    """
+
+    if col_1based <= 2:
+        return
+
+    sheets.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": col_1based - 1,
+                            "endIndex": col_1based,
+                        },
+                        "properties": {
+                            "hiddenByUser": True,
+                        },
+                        "fields": "hiddenByUser",
+                    }
+                }
+            ]
+        },
+    ).execute()
+
+
+def _format_and_hide_property_tab_columns(
+    sheets,
+    spreadsheet_id: str,
+    property_sheet_id: int,
+    shannon_values: list[list[Any]],
+) -> None:
+    """
+    Apply user-friendly formatting and hide less-used Shannon detail columns
+    on individual property tabs.
+    """
+
+    headers = _find_header_columns_in_values(shannon_values)
+
+    if not headers:
+        print("Could not find Shannon headers for property tab formatting")
+        return
+
+    percent_headers = [
+        "Interest Rate",
+        "Maintenance %",
+        "Vacancy %",
+        "Closing Cost %",
+        "Down Payment %",
+        "Cash on Cash %",
+        "Cap Rate Est",
+    ]
+
+    currency_headers = [
+        "Property Mgmt $/Door (Monthly)",
+        "Appraisal Fee $/Door",
+        "Zest Rent",
+        "Price",
+        "Rent Estimate (Monthly)",
+        "Rent Median",
+        "Rent Mean",
+        "Rent Min",
+        "Annual Taxes",
+        "Tax Appraisal",
+        "Tax Land Value",
+        "Insurance Annual",
+        "Rehab Cost (Override)",
+        "Closing Cost $",
+        "Monthly PI Payment",
+        "Monthly Maintenance $",
+        "Monthly Vacancy $",
+        "Monthly Mgmt $",
+        "Monthly Tax $",
+        "Monthly Insurance $",
+        "Monthly Operating Expenses $",
+        "Monthly Cashflow Est",
+        "NOI Annual Est",
+    ]
+
+    for header in percent_headers:
+        col_idx = _find_col(headers, [header])
+
+        if col_idx:
+            _format_column(
+                sheets=sheets,
+                spreadsheet_id=spreadsheet_id,
+                sheet_id=property_sheet_id,
+                col_1based=col_idx,
+                number_format_type="PERCENT",
+                pattern="0.00%",
+            )
+
+    for header in currency_headers:
+        col_idx = _find_col(headers, [header])
+
+        if col_idx:
+            _format_column(
+                sheets=sheets,
+                spreadsheet_id=spreadsheet_id,
+                sheet_id=property_sheet_id,
+                col_1based=col_idx,
+                number_format_type="CURRENCY",
+                pattern="$#,##0.00;[Red]($#,##0.00)",
+            )
+
+    headers_to_hide = [
+        "Type",
+        "State",
+        "Zip",
+        "Rent P25",
+        "Rent P75",
+        "Rent Max",
+        "Rent StdDev",
+        "Rent Error",
+        "County Tax PIN",
+        "Rehab Cost (Override)",
+        "Maintenance %",
+        "Vacancy %",
+        "Property Mgmt $/Door (Monthly)",
+        "Appraisal Fee $/Door",
+        "Interest Rate",
+        "Amortization (Years)",
+        "Closing Cost %",
+        "Down Payment %",
+        "Closing Cost $",
+        "Monthly PI Payment",
+        "Monthly Maintenance $",
+        "Monthly Mgmt $",
+        "Monthly Tax $",
+    ]
+
+    for header in headers_to_hide:
+        col_idx = _find_col(headers, [header])
+
+        if col_idx:
+            _hide_column(
+                sheets=sheets,
+                spreadsheet_id=spreadsheet_id,
+                sheet_id=property_sheet_id,
+                col_1based=col_idx,
+            )
+
 def _link_property_tab_formulas(
     sheets,
     spreadsheet_id: str,
@@ -1069,6 +1283,13 @@ def _create_shannon_property_tab(
         spreadsheet_id,
         f"{_quote_sheet_name(sheet_title)}!A1",
         shannon_values,
+    )
+
+    _format_and_hide_property_tab_columns(
+        sheets=sheets,
+        spreadsheet_id=spreadsheet_id,
+        property_sheet_id=property_sheet_id,
+        shannon_values=shannon_values,
     )
 
     _link_property_tab_formulas(
