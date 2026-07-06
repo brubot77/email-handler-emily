@@ -21,7 +21,7 @@ DEFAULT_CREDENTIALS_PATH = "/home/brubot77/email-handler-emily/credentials.json"
 DEFAULT_TOKEN_PATH = "/home/brubot77/email-handler-emily/token.json"
 
 ACTIVE_DEALS_NAME_RE = re.compile(
-    r"^BLU Active Deals.*\.xlsx$",
+    r"^BLU Active Deals(?:\s*\(.*\)|\s*-\s*.*)?(?:\.xlsx)?$",
     re.IGNORECASE,
 )
 
@@ -188,9 +188,6 @@ def find_latest_active_deals_file() -> tuple[str, str]:
         name = item.get("name", "")
 
         if not ACTIVE_DEALS_NAME_RE.match(name):
-            continue
-
-        if not name.lower().endswith(".xlsx"):
             continue
 
         candidates.append((
