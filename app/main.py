@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from openpyxl import load_workbook
 from app.refi_processor import process_refi_message
-from app.active_deals import update_active_deals_from_email
+from app.active_deals import update_active_deals_from_email, ensure_active_deals_tabs_only
 from html import unescape
 
 GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
@@ -718,8 +718,23 @@ def handle_active_deals_request(
     body_text = decode_message_body(message)
 
     if not body_text.strip():
-        print(f"{message_id}: Active Deals email had no body text")
-        gmail.mark_failed(message_id, failed_label_id)
+        try:
+            created_tab_count = ensure_active_deals_tabs_only()
+        except Exception as exc:
+            print(f"{message_id}: Active Deals tab check failed -> {exc}")
+            gmail.mark_failed(message_id, failed_label_id)
+            return True
+
+        print(
+            f"{message_id}: Active Deals email had blank body; "
+            f"created {created_tab_count} missing property underwriting tab(s)"
+        )
+
+        gmail.mark_processed_and_archive(
+            message_id,
+            processed_label_id,
+        )
+
         return True
 
     try:

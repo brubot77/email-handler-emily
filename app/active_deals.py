@@ -857,6 +857,25 @@ def _update_one_active_deal_block(
         updated_fields=sorted(set(updated_fields)),
     )
 
+def ensure_active_deals_tabs_only() -> int:
+    file_id, file_name = find_latest_active_deals_file()
+
+    with tempfile.TemporaryDirectory(prefix="active_deals_tabs_") as tmp:
+        safe_file_name = file_name
+
+        if not safe_file_name.lower().endswith((".xlsx", ".xlsm")):
+            safe_file_name = f"{safe_file_name}.xlsx"
+
+        local_path = Path(tmp) / safe_file_name
+        download_drive_file(file_id, local_path)
+
+        wb = load_workbook(local_path)
+        created_tab_count = ensure_property_underwriting_tabs(wb)
+        wb.save(local_path)
+
+        upload_drive_file(file_id, local_path)
+
+    return created_tab_count
 
 def update_active_deals_from_email(body_text: str) -> list[ActiveDealsResult]:
     blocks = parse_active_deal_blocks(body_text)
