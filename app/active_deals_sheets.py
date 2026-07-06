@@ -687,6 +687,42 @@ def _write_values(sheets, spreadsheet_id: str, range_name: str, values: list[lis
     ).execute()
 
 
+def _delete_existing_protections_by_description(
+    sheets,
+    spreadsheet_id: str,
+    sheet_id: int,
+    description: str,
+) -> None:
+    meta = sheets.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets(properties(sheetId,title),protectedRanges(protectedRangeId,description,range))",
+    ).execute()
+
+    delete_requests = []
+
+    for sheet in meta.get("sheets", []):
+        props = sheet.get("properties", {})
+
+        if props.get("sheetId") != sheet_id:
+            continue
+
+        for protected_range in sheet.get("protectedRanges", []) or []:
+            if protected_range.get("description") == description:
+                delete_requests.append(
+                    {
+                        "deleteProtectedRange": {
+                            "protectedRangeId": protected_range["protectedRangeId"]
+                        }
+                    }
+                )
+
+    if delete_requests:
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": delete_requests},
+        ).execute()
+
+
 def _protect_range(
     sheets,
     spreadsheet_id: str,
@@ -697,6 +733,21 @@ def _protect_range(
     end_col_1based_inclusive: int,
     description: str,
 ) -> None:
+    """
+    Add native Google Sheets protection.
+
+    warningOnly=True is intentional because owners can usually still edit hard
+    protected ranges. Warning protection gives a clear accidental-edit guard
+    in Google Sheets.
+    """
+
+    _delete_existing_protections_by_description(
+        sheets=sheets,
+        spreadsheet_id=spreadsheet_id,
+        sheet_id=sheet_id,
+        description=description,
+    )
+
     sheets.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={
@@ -712,7 +763,7 @@ def _protect_range(
                                 "endColumnIndex": end_col_1based_inclusive,
                             },
                             "description": description,
-                            "warningOnly": False,
+                            "warningOnly": True,
                         }
                     }
                 }
@@ -720,6 +771,42 @@ def _protect_range(
         },
     ).execute()
 
+def _format_cell(
+    sheets,
+    spreadsheet_id: str,
+    sheet_id: int,
+    row_1based: int,
+    col_1based: int,
+    number_format_type: str,
+    pattern: str,
+) -> None:
+    sheets.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "requests": [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_1based - 1,
+                            "endRowIndex": row_1based,
+                            "startColumnIndex": col_1based - 1,
+                            "endColumnIndex": col_1based,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {
+                                    "type": number_format_type,
+                                    "pattern": pattern,
+                                }
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+            ]
+        },
+    ).execute()
 
 def _link_property_tab_formulas(
     sheets,
@@ -787,6 +874,67 @@ def _link_property_tab_formulas(
             [[value]],
         )
 
+    # Native Google Sheets number formats.
+    # Property tab:
+    #   B5 = down payment %
+    #   O16 = price $
+    _format_cell(
+        sheets,
+        spreadsheet_id,
+        property_sheet_id,
+        5,
+        2,
+        "PERCENT",
+        "0.00%",
+    )
+
+    _format_cell(
+        sheets,
+        spreadsheet_id,
+        property_sheet_id,
+        16,
+        15,
+        "CURRENCY",
+        "$#,##0.00;[Red]($#,##0.00)",
+    )
+
+    # Active Deals:
+    #   Cash Left in Deal = $
+    #   ConC = %
+    #   Annual Cashflow = $
+    if cash_left_col:
+        _format_cell(
+            sheets,
+            spreadsheet_id,
+            active_sheet_id,
+            active_row_idx,
+            cash_left_col,
+            "CURRENCY",
+            "$#,##0.00;[Red]($#,##0.00)",
+        )
+
+    if conc_col:
+        _format_cell(
+            sheets,
+            spreadsheet_id,
+            active_sheet_id,
+            active_row_idx,
+            conc_col,
+            "PERCENT",
+            "0.00%",
+        )
+
+    if annual_cashflow_col:
+        _format_cell(
+            sheets,
+            spreadsheet_id,
+            active_sheet_id,
+            active_row_idx,
+            annual_cashflow_col,
+            "CURRENCY",
+            "$#,##0.00;[Red]($#,##0.00)",
+        )
+        
     # Native Google Sheets protected ranges.
     # Property tab locked formula cells: B5, O16.
     _protect_range(
