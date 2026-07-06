@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from openpyxl import load_workbook
 from app.refi_processor import process_refi_message
-from app.active_deals import update_active_deals_from_email, ensure_active_deals_tabs_only
+from app.active_deals_sheets import update_active_deals_from_email, ensure_active_deals_tabs_only
 from html import unescape
 
 GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
