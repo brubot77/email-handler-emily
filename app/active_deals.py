@@ -273,11 +273,57 @@ def _find_col(headers: dict[str, int], candidates: list[str]) -> int | None:
 
     return None
 
+def _prepare_active_deals_text(body_text: str) -> str:
+    text = (body_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # Some Gmail/iPhone HTML bodies arrive with the address and next label glued:
+    #   2607 poplar, wichitaBlu rent est: $925
+    #   257 Poplar, wichitaOffer status: BLU2 purchased
+    #
+    # Insert a newline before known labels even when glued to the prior text.
+    known_labels = [
+        "address",
+        "property address",
+        "street address",
+        "property",
+        "status",
+        "status update",
+        "offer status",
+        "rent",
+        "monthly rent",
+        "zest rent",
+        "market rent",
+        "blu rent est",
+        "blue rent est",
+        "price",
+        "asking price",
+        "purchase price",
+        "offer price",
+        "beds",
+        "bedrooms",
+        "baths",
+        "bathrooms",
+        "source",
+        "notes",
+        "note",
+        "comments",
+        "comment",
+    ]
+
+    label_pattern = "|".join(re.escape(label) for label in known_labels)
+
+    text = re.sub(
+        rf"(?i)(?<!^)(?<!\n)({label_pattern})\s*:",
+        r"\n\1:",
+        text,
+    )
+
+    return text
 
 def _extract_labeled_fields(body_text: str) -> dict[str, str]:
     fields: dict[str, str] = {}
 
-    text = (body_text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = _prepare_active_deals_text(body_text)
 
     pattern = re.compile(r"(?im)^\s*([A-Za-z][A-Za-z0-9 /&()._-]{1,50})\s*:\s*(.*)$")
     matches = list(pattern.finditer(text))
@@ -356,7 +402,7 @@ def parse_active_deal_blocks(body_text: str) -> list[str]:
       Status: Research
     """
 
-    text = (body_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = _prepare_active_deals_text(body_text)
 
     if not text:
         return []
