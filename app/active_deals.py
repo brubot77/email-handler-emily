@@ -3,6 +3,11 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import csv
+import shutil
+import subprocess
+import time
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +25,11 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 DEFAULT_CREDENTIALS_PATH = "/home/brubot77/email-handler-emily/credentials.json"
 DEFAULT_TOKEN_PATH = "/home/brubot77/email-handler-emily/token.json"
+
+SHANNON_DIR = Path("/home/brubot77/.openclaw/workspace/shannon")
+SHANNON_INPUT_DIR = SHANNON_DIR / "Input"
+SHANNON_OUTPUT_DIR = SHANNON_DIR / "Output"
+SHANNON_VENV_ACTIVATE = SHANNON_DIR / ".venv/bin/activate"
 
 ACTIVE_DEALS_NAME_RE = re.compile(
     r"^BLU Active Deals(?:\s*\(.*\)|\s*-\s*.*)?(?:\.xlsx)?$",
@@ -600,6 +610,160 @@ def _get_cell_ref(sheet_name: str, row_idx: int, col_idx: int | None) -> str:
 
     return f"'{safe_sheet_name}'!{col_letter}{row_idx}"
 
+def _copy_cell(source_cell, target_cell) -> None:
+    target_cell.value = source_cell.value
+
+    if source_cell.has_style:
+        target_cell.font = copy(source_cell.font)
+        target_cell.fill = copy(source_cell.fill)
+        target_cell.border = copy(source_cell.border)
+        target_cell.alignment = copy(source_cell.alignment)
+        target_cell.number_format = source_cell.number_format
+        target_cell.protection = copy(source_cell.protection)
+
+    if source_cell.hyperlink:
+        target_cell._hyperlink = copy(source_cell.hyperlink)
+
+    if source_cell.comment:
+        target_cell.comment = copy(source_cell.comment)
+
+
+def _copy_worksheet_contents(source_ws, target_ws) -> None:
+    for row in source_ws.iter_rows():
+        for source_cell in row:
+            target_cell = target_ws.cell(
+                row=source_cell.row,
+                column=source_cell.column,
+            )
+            _copy_cell(source_cell, target_cell)
+
+    for col_letter, dim in source_ws.column_dimensions.items():
+        target_ws.column_dimensions[col_letter].width = dim.width
+        target_ws.column_dimensions[col_letter].hidden = dim.hidden
+
+    for row_idx, dim in source_ws.row_dimensions.items():
+        target_ws.row_dimensions[row_idx].height = dim.height
+        target_ws.row_dimensions[row_idx].hidden = dim.hidden
+
+    for merged_range in source_ws.merged_cells.ranges:
+        target_ws.merge_cells(str(merged_range))
+
+    target_ws.freeze_panes = source_ws.freeze_panes
+    target_ws.sheet_view.showGridLines = source_ws.sheet_view.showGridLines
+
+
+def _split_address_city_state(address: str) -> tuple[str, str, str]:
+    parts = [p.strip() for p in str(address or "").split(",")]
+
+    street = parts[0] if parts else str(address or "").strip()
+    city = parts[1] if len(parts) >= 2 else "Wichita"
+    state = "KS"
+
+    if len(parts) >= 3:
+        state_part = parts[2].strip().split()
+        if state_part:
+            state = state_part[0]
+
+    return street, city, state
+
+
+def _snapshot_shannon_outputs() -> dict[str, float]:
+    return {
+        str(path): path.stat().st_mtime
+        for path in SHANNON_OUTPUT_DIR.glob("*.xlsx")
+    }
+
+
+def _newest_shannon_output_after(before_snapshot: dict[str, float]) -> Path:
+    candidates = sorted(
+        SHANNON_OUTPUT_DIR.glob("*.xlsx"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+    for path in candidates:
+        old_mtime = before_snapshot.get(str(path))
+
+        if old_mtime is None:
+            return path
+
+        if path.stat().st_mtime > old_mtime:
+            return path
+
+    raise FileNotFoundError("Shannon ran but no new output workbook was detected")
+
+
+def _run_shannon_for_property(address: str) -> Path:
+    street, city, state = _split_address_city_state(address)
+
+    SHANNON_INPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", street).strip("_") or "property"
+    csv_path = SHANNON_INPUT_DIR / f"active_deals_{safe_name}_{stamp}.csv"
+
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["Address", "City", "State"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "Address": street,
+                "City": city,
+                "State": state,
+            }
+        )
+
+    before_snapshot = _snapshot_shannon_outputs()
+
+    cmd = (
+        f"cd {SHANNON_DIR} "
+        f"&& source .venv/bin/activate "
+        f"&& python3 -m shannon.cli"
+    )
+
+    result = subprocess.run(
+        ["bash", "-lc", cmd],
+        capture_output=True,
+        text=True,
+        timeout=240,
+    )
+
+    if result.stdout:
+        print(result.stdout)
+
+    if result.stderr:
+        print(result.stderr)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Shannon failed for {address}")
+
+    time.sleep(1)
+
+    return _newest_shannon_output_after(before_snapshot)
+
+
+def _copy_shannon_output_to_property_tab(
+    wb,
+    property_tab_title: str,
+    shannon_output_path: Path,
+) -> None:
+    source_wb = load_workbook(shannon_output_path, data_only=False)
+    source_ws = source_wb[source_wb.sheetnames[0]]
+
+    if property_tab_title in wb.sheetnames:
+        del wb[property_tab_title]
+
+    target_ws = wb.create_sheet(property_tab_title)
+
+    _copy_worksheet_contents(source_ws, target_ws)
+
+    # Add source note to make it clear this came from Shannon.
+    note_row = source_ws.max_row + 2
+    target_ws.cell(row=note_row, column=1, value="Source")
+    target_ws.cell(row=note_row, column=2, value=f"Generated by Shannon: {shannon_output_path.name}")
 
 def _build_property_underwriting_tab(
     wb,
@@ -613,106 +777,16 @@ def _build_property_underwriting_tab(
         return
 
     sheet_title = _unique_sheet_title(wb, address)
-    ws = wb.create_sheet(sheet_title)
 
-    active_sheet_name = active_ws.title
+    print(f"Creating Shannon underwriting tab for {address}")
 
-    header_fill = PatternFill("solid", fgColor="D9EAD3")
-    section_fill = PatternFill("solid", fgColor="CFE2F3")
-    bold = Font(bold=True)
+    shannon_output_path = _run_shannon_for_property(address)
 
-    ws["A1"] = "Shannon Underwriting"
-    ws["A1"].font = Font(bold=True, size=14)
-
-    ws["A3"] = "Property"
-    ws["A3"].font = bold
-    ws["B3"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['Address', 'Property Address', 'Property', 'Street Address']))}"
-
-    ws["A4"] = "City"
-    ws["B4"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['City']))}"
-
-    ws["A5"] = "Status"
-    ws["B5"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['Status', 'Offer Status']))}"
-
-    ws["A6"] = "Notes"
-    ws["B6"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['Notes', 'Comments']))}"
-
-    ws["A8"] = "Inputs"
-    ws["A8"].fill = section_fill
-    ws["A8"].font = bold
-
-    input_rows = [
-        ("Purchase Price", ["Price", "Asking Price", "Purchase Price", "Offer Price"]),
-        ("Rehab Budget", ["Rehab", "Rehab Budget", "Repairs", "Repair Budget"]),
-        ("Monthly Rent", ["Rent", "Monthly Rent", "Zest Rent", "Market Rent", "BLU Rent Est"]),
-        ("Taxes / Month", ["Taxes", "Monthly Taxes", "Tax"]),
-        ("Insurance / Month", ["Insurance", "Monthly Insurance"]),
-        ("Mgmt / Month", ["Management", "Mgmt", "Property Management"]),
-        ("Vacancy / Month", ["Vacancy"]),
-        ("Maintenance / Month", ["Maintenance", "Repairs Reserve"]),
-        ("Mortgage / Month", ["Mortgage", "Debt Service", "Monthly Mortgage", "Payment"]),
-    ]
-
-    start_row = 9
-
-    for offset, (label, candidates) in enumerate(input_rows):
-        row = start_row + offset
-        col_idx = _find_col(headers, candidates)
-
-        ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=1).font = bold
-
-        if col_idx:
-            ws.cell(row=row, column=2, value=f"={_get_cell_ref(active_sheet_name, row_idx, col_idx)}")
-        else:
-            ws.cell(row=row, column=2, value=0)
-
-    ws["D8"] = "Shannon Logic"
-    ws["D8"].fill = section_fill
-    ws["D8"].font = bold
-
-    formulas = [
-        ("All-In Cost", "=SUM(B9:B10)"),
-        ("Annual Rent", "=B11*12"),
-        ("Monthly Operating Expenses", "=SUM(B12:B16)"),
-        ("NOI Before Debt", "=B11-D11"),
-        ("Annual NOI Before Debt", "=D12*12"),
-        ("Monthly Cashflow After Debt", "=D12-B17"),
-        ("Annual Cashflow After Debt", "=D14*12"),
-        ("Rent / All-In Cost", '=IFERROR(B11/D9,"")'),
-        ("Cash-on-Cash Placeholder", ""),
-        ("DSCR Placeholder", '=IFERROR(D12/B17,"")'),
-    ]
-
-    for offset, (label, formula) in enumerate(formulas):
-        row = start_row + offset
-        ws.cell(row=row, column=4, value=label)
-        ws.cell(row=row, column=4).font = bold
-        ws.cell(row=row, column=5, value=formula)
-
-    ws["A21"] = "Source"
-    ws["A21"].font = bold
-    ws["B21"] = "Auto-created by Emily from BLU Active Deals"
-
-    ws["A22"] = "Active Deals Row"
-    ws["A22"].font = bold
-    ws["B22"] = row_idx
-
-    for col in ["A", "B", "D", "E"]:
-        ws.column_dimensions[col].width = 24
-
-    ws["B6"].alignment = Alignment(wrap_text=True)
-
-    for cell in ws[8]:
-        cell.font = bold
-
-    # Currency formatting
-    for cell_ref in ["B9", "B10", "B11", "B12", "B13", "B14", "B15", "B16", "B17", "E9", "E11", "E12", "E13", "E14", "E15"]:
-        ws[cell_ref].number_format = '$#,##0.00;[Red]($#,##0.00)'
-
-    for cell_ref in ["E16", "E18"]:
-        ws[cell_ref].number_format = '0.00%'
-
+    _copy_shannon_output_to_property_tab(
+        wb=wb,
+        property_tab_title=sheet_title,
+        shannon_output_path=shannon_output_path,
+    )
 
 def ensure_property_underwriting_tabs(wb) -> int:
     """
