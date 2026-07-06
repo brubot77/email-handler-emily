@@ -500,6 +500,21 @@ def _existing_match_row(ws, header_row: int, address_col: int, incoming_key: str
 
     return None
 
+def _first_empty_address_row(ws, header_row: int, address_col: int) -> int:
+    """
+    Find the first row where the Address column is actually empty.
+
+    Do not use ws.max_row because Excel/openpyxl may count formatted rows
+    far below the real data.
+    """
+
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        value = ws.cell(row=row_idx, column=address_col).value
+
+        if value is None or str(value).strip() == "":
+            return row_idx
+
+    return ws.max_row + 1
 
 def _update_one_active_deal_block(
     body_text: str,
@@ -532,7 +547,7 @@ def _update_one_active_deal_block(
     action = "updated"
 
     if row_idx is None:
-        row_idx = ws.max_row + 1
+        row_idx = _first_empty_address_row(ws, header_row, address_col)
         action = "added"
 
     city, state, zip_code = _split_city_state_zip(address)
