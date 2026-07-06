@@ -12,6 +12,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from app.refi_processor import process_refi_message
 from app.active_deals import update_active_deals_from_email
+from html import unescape
 
 GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
 GOOGLE_DRIVE_ROOT_FOLDER_ID = "1kbUI4CrAXDMeE4mjj8pMJ_GrM488QEIa"
@@ -372,23 +373,49 @@ def extract_reply_to_from_body(body_text: str) -> str | None:
 
 def decode_message_body(message: dict) -> str:
     payload = message.get("payload", {})
-    texts: list[str] = []
+    plain_texts: list[str] = []
+    html_texts: list[str] = []
+
+    def decode_data(data: str) -> str:
+        padded = data + "=" * (-len(data) % 4)
+        return base64.urlsafe_b64decode(
+            padded.encode("utf-8")
+        ).decode("utf-8", errors="ignore")
+
+    def html_to_text(html: str) -> str:
+        text = html
+
+        text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</p\s*>", "\n", text)
+        text = re.sub(r"(?i)</div\s*>", "\n", text)
+        text = re.sub(r"(?i)</li\s*>", "\n", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = unescape(text)
+        text = text.replace("\xa0", " ")
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s+", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        return text.strip()
 
     def walk(part: dict) -> None:
         mime_type = part.get("mimeType", "")
         body = part.get("body", {})
         data = body.get("data")
 
-        if mime_type == "text/plain" and data:
-            padded = data + "=" * (-len(data) % 4)
-
+        if data:
             try:
-                decoded = base64.urlsafe_b64decode(
-                    padded.encode("utf-8")
-                ).decode("utf-8", errors="ignore")
+                decoded = decode_data(data)
 
-                if decoded.strip():
-                    texts.append(decoded)
+                if mime_type == "text/plain" and decoded.strip():
+                    plain_texts.append(decoded.strip())
+
+                elif mime_type == "text/html" and decoded.strip():
+                    converted = html_to_text(decoded)
+
+                    if converted.strip():
+                        html_texts.append(converted.strip())
 
             except Exception:
                 pass
@@ -398,11 +425,13 @@ def decode_message_body(message: dict) -> str:
 
     walk(payload)
 
-    if texts:
-        return "\n".join(texts).strip()
+    if plain_texts:
+        return "\n".join(plain_texts).strip()
+
+    if html_texts:
+        return "\n".join(html_texts).strip()
 
     return ""
-
 
 def parse_address_update_body(body_text: str) -> list[dict[str, str]]:
     """
