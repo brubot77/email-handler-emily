@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from openpyxl import load_workbook
 from app.refi_processor import process_refi_message
+from app.active_deals import update_active_deals_from_email
 
 GOOGLE_DRIVE_REMOTE_DIR = "gdrive:BLU Review Docs/Property_Reviews/Shannon_Output"
 GOOGLE_DRIVE_ROOT_FOLDER_ID = "1kbUI4CrAXDMeE4mjj8pMJ_GrM488QEIa"
@@ -673,6 +674,45 @@ def handle_address_data_request(
 
     return True
 
+def handle_active_deals_request(
+    message: dict,
+    gmail: GmailClient,
+    processed_label_id: str,
+    failed_label_id: str,
+) -> bool:
+    subject = get_subject(message).strip().lower()
+
+    if "active deals" not in subject:
+        return False
+
+    message_id = message["id"]
+    body_text = decode_message_body(message)
+
+    if not body_text.strip():
+        print(f"{message_id}: Active Deals email had no body text")
+        gmail.mark_failed(message_id, failed_label_id)
+        return True
+
+    try:
+        result = update_active_deals_from_email(body_text)
+    except Exception as exc:
+        print(f"{message_id}: Active Deals update failed -> {exc}")
+        gmail.mark_failed(message_id, failed_label_id)
+        return True
+
+    print(
+        f"{message_id}: Active Deals {result.action} row {result.row_number} "
+        f"in {result.file_name} for {result.address} "
+        f"match_key={result.match_key} "
+        f"fields={result.updated_fields}"
+    )
+
+    gmail.mark_processed_and_archive(
+        message_id,
+        processed_label_id,
+    )
+
+    return True
 
 def main():
     parser = argparse.ArgumentParser()
@@ -729,6 +769,18 @@ def main():
         )
 
         if handled_address_data:
+            processed_ids.add(message_id)
+            state.save(processed_ids)
+            continue
+
+        handled_active_deals = handle_active_deals_request(
+            message,
+            gmail,
+            processed_label_id,
+            failed_label_id,
+        )
+
+        if handled_active_deals:
             processed_ids.add(message_id)
             state.save(processed_ids)
             continue
