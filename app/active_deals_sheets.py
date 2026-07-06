@@ -820,10 +820,11 @@ def _link_property_tab_formulas(
 ) -> None:
     latest_offer_col = _find_col(headers, ["Latest Offer", "Offer", "Offer Price", "Purchase Price", "Price"])
     appraisal_est_col = _find_col(headers, ["Appraisal Est.", "Appraisal Est", "Appraisal Estimate", "Appraisal"])
+    rehab_est_col = _find_col(headers, ["Rehab Est.", "Rehab Est", "Rehab Estimate", "Rehab", "Repairs"])
     conc_col = _find_col(headers, ["ConC", "CoC", "Cash on Cash", "Cash on Cash %"])
     annual_cashflow_col = _find_col(headers, ["Annual Cashflow", "Annual Cash Flow", "Annual CF"])
     cash_left_col = _find_col(headers, ["Cash Left in Deal", "Cash Left In Deal", "Cash Left", "Cash In Deal"])
-
+    
     formula_updates: list[tuple[str, Any]] = []
 
     if latest_offer_col:
@@ -840,6 +841,15 @@ def _link_property_tab_formulas(
         formula_updates.append((
             _a1(property_sheet_name, 5, 2),  # B5
             f'=IFERROR(1-(0.8*{appraisal_ref}/{latest_offer_ref}),0.2)',
+        ))
+
+    # Individual tab Rehab Cost Override AG16 = Active Deals Rehab Est.
+    if rehab_est_col:
+        rehab_est_ref = _a1(active_sheet_name, active_row_idx, rehab_est_col)
+
+        formula_updates.append((
+            _a1(property_sheet_name, 16, 33),  # AG16
+            f"={rehab_est_ref}",
         ))
 
     if cash_left_col:
@@ -878,6 +888,8 @@ def _link_property_tab_formulas(
     # Property tab:
     #   B5 = down payment %
     #   O16 = price $
+    #   P16 = Cash on Cash %
+    #   AG16 = Rehab Cost Override $
     _format_cell(
         sheets,
         spreadsheet_id,
@@ -894,6 +906,26 @@ def _link_property_tab_formulas(
         property_sheet_id,
         16,
         15,
+        "CURRENCY",
+        "$#,##0.00;[Red]($#,##0.00)",
+    )
+
+    _format_cell(
+        sheets,
+        spreadsheet_id,
+        property_sheet_id,
+        16,
+        16,
+        "PERCENT",
+        "0.00%",
+    )
+
+    _format_cell(
+        sheets,
+        spreadsheet_id,
+        property_sheet_id,
+        16,
+        33,
         "CURRENCY",
         "$#,##0.00;[Red]($#,##0.00)",
     )
@@ -958,6 +990,18 @@ def _link_property_tab_formulas(
         15,
         f"Emily protected price formula for {property_sheet_name}",
     )
+
+    if rehab_est_col:
+        _protect_range(
+            sheets,
+            spreadsheet_id,
+            property_sheet_id,
+            16,
+            16,
+            33,
+            33,
+            f"Emily protected rehab override formula for {property_sheet_name}",
+        )
 
     # Active Deals locked formula cells: Cash Left, ConC, Annual Cashflow.
     if cash_left_col:
