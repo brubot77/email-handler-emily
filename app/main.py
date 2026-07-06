@@ -694,18 +694,19 @@ def handle_active_deals_request(
         return True
 
     try:
-        result = update_active_deals_from_email(body_text)
+        results = update_active_deals_from_email(body_text)
     except Exception as exc:
         print(f"{message_id}: Active Deals update failed -> {exc}")
         gmail.mark_failed(message_id, failed_label_id)
         return True
 
-    print(
-        f"{message_id}: Active Deals {result.action} row {result.row_number} "
-        f"in {result.file_name} for {result.address} "
-        f"match_key={result.match_key} "
-        f"fields={result.updated_fields}"
-    )
+    for result in results:
+        print(
+            f"{message_id}: Active Deals {result.action} row {result.row_number} "
+            f"in {result.file_name} for {result.address} "
+            f"match_key={result.match_key} "
+            f"fields={result.updated_fields}"
+        )
 
     gmail.mark_processed_and_archive(
         message_id,

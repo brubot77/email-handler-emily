@@ -307,6 +307,24 @@ def _extract_labeled_fields(body_text: str) -> dict[str, str]:
     return fields
 
 
+def _looks_like_address_line(line: str) -> bool:
+    line = str(line or "").strip()
+
+    if not line:
+        return False
+
+    if ":" in line:
+        return False
+
+    return bool(
+        re.search(
+            r"^\s*\d{2,6}\s+(?:[NSEW]\.?\s+|North\s+|South\s+|East\s+|West\s+)?[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,4}(?:,\s*[A-Za-z .'-]+)?",
+            line,
+            re.IGNORECASE,
+        )
+    )
+
+
 def _extract_address_from_body(body_text: str, fields: dict[str, str]) -> str:
     for key in ["address", "propertyaddress", "streetaddress", "property"]:
         value = fields.get(key)
@@ -316,37 +334,68 @@ def _extract_address_from_body(body_text: str, fields: dict[str, str]) -> str:
 
     text = (body_text or "").replace("\r\n", "\n").replace("\r", "\n")
 
-    address_line_re = re.compile(
-        r"""
-        ^\s*
-        (?P<address>
-            \d{2,6}
-            \s+
-            (?:[NSEW]\.?\s+|North\s+|South\s+|East\s+|West\s+)?
-            [A-Za-z0-9.'-]+
-            (?:\s+[A-Za-z0-9.'-]+){0,4}
-            (?:\s+(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Pl|Place|Blvd|Boulevard|Ter|Terrace|Pkwy|Parkway|Cir|Circle|Way))?
-            (?:,\s*[A-Za-z .'-]+)?
-            (?:,\s*(?:KS|Kansas))?
-            (?:\s+\d{5})?
-        )
-        \s*$
-        """,
-        re.IGNORECASE | re.VERBOSE,
-    )
-
     for line in text.splitlines():
         line = line.strip()
 
-        if not line:
-            continue
-
-        match = address_line_re.match(line)
-
-        if match:
-            return match.group("address").strip()
+        if _looks_like_address_line(line):
+            return line
 
     return ""
+
+def parse_active_deal_blocks(body_text: str) -> list[str]:
+    """
+    Split one Active Deals email into one or more deal blocks.
+
+    Supports:
+      2607 poplar, wichita
+      Blu rent est: $925
+
+      257 Poplar, wichita
+      Offer status: BLU2 purchased
+
+    Also supports:
+      Address: 2607 N Poplar St, Wichita
+      Rent: 925
+      Status: Research
+    """
+
+    text = (body_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    if not text:
+        return []
+
+    lines = text.splitlines()
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line:
+            if current:
+                current.append("")
+            continue
+
+        is_address = _looks_like_address_line(line) or line.lower().startswith("address:")
+
+        if is_address and current:
+            cleaned_current = "\n".join(current).strip()
+
+            if cleaned_current:
+                blocks.append(current)
+
+            current = [line]
+        else:
+            current.append(line)
+
+    if current:
+        cleaned_current = "\n".join(current).strip()
+
+        if cleaned_current:
+            blocks.append(current)
+
+    return ["\n".join(block).strip() for block in blocks if "\n".join(block).strip()]
 
 
 def _field_aliases_for_header(header_key: str) -> list[str]:
@@ -358,10 +407,10 @@ def _field_aliases_for_header(header_key: str) -> list[str]:
         "state": ["state"],
         "zip": ["zip", "zipcode", "postalcode"],
         "zipcode": ["zipcode", "zip", "postalcode"],
-        "status": ["status", "statusupdate"],
+        "status": ["status", "statusupdate", "offerstatus"],
         "notes": ["notes", "note", "comments", "comment"],
-        "rent": ["rent", "monthlyrent", "zestrent", "marketrent"],
-        "monthlyrent": ["monthlyrent", "rent", "zestrent", "marketrent"],
+        "rent": ["rent", "monthlyrent", "zestrent", "marketrent", "blurentest", "bluerentest", "bluentest"],
+        "monthlyrent": ["monthlyrent", "rent", "zestrent", "marketrent", "blurentest", "bluerentest", "bluentest"],
         "zestrent": ["zestrent", "rent", "monthlyrent"],
         "price": ["price", "askingprice", "purchaseprice", "offerprice"],
         "askingprice": ["askingprice", "price", "purchaseprice"],
@@ -409,7 +458,12 @@ def _existing_match_row(ws, header_row: int, address_col: int, incoming_key: str
     return None
 
 
-def update_active_deals_from_email(body_text: str) -> ActiveDealsResult:
+def _update_one_active_deal_block(
+    body_text: str,
+    file_id: str,
+    file_name: str,
+    local_path: Path,
+) -> ActiveDealsResult:
     fields = _extract_labeled_fields(body_text)
     address = _extract_address_from_body(body_text, fields)
 
@@ -421,85 +475,74 @@ def update_active_deals_from_email(body_text: str) -> ActiveDealsResult:
     if not match_key:
         raise ValueError(f"Could not build address match key for: {address}")
 
-    file_id, file_name = find_latest_active_deals_file()
+    wb = load_workbook(local_path)
+    ws = wb.active
 
-    with tempfile.TemporaryDirectory(prefix="active_deals_") as tmp:
-        local_path = Path(tmp) / file_name
-        download_drive_file(file_id, local_path)
+    header_row, headers = _find_header_row_and_map(ws)
 
-        wb = load_workbook(local_path)
-        ws = wb.active
+    address_col = _find_col(headers, ["Address", "Property Address", "Property", "Street Address"])
 
-        header_row, headers = _find_header_row_and_map(ws)
+    if address_col is None:
+        raise ValueError("BLU Active Deals workbook does not have an Address/Property column")
 
-        address_col = _find_col(headers, ["Address", "Property Address", "Property", "Street Address"])
+    row_idx = _existing_match_row(ws, header_row, address_col, match_key)
+    action = "updated"
 
-        if address_col is None:
-            raise ValueError("BLU Active Deals workbook does not have an Address/Property column")
+    if row_idx is None:
+        row_idx = ws.max_row + 1
+        action = "added"
 
-        row_idx = _existing_match_row(ws, header_row, address_col, match_key)
-        action = "updated"
+    city, state, zip_code = _split_city_state_zip(address)
 
-        if row_idx is None:
-            row_idx = ws.max_row + 1
-            action = "added"
+    updated_fields: list[str] = []
 
-        city, state, zip_code = _split_city_state_zip(address)
+    ws.cell(row=row_idx, column=address_col, value=address)
+    updated_fields.append("Address")
 
-        updated_fields: list[str] = []
+    city_col = _find_col(headers, ["City"])
+    state_col = _find_col(headers, ["State"])
+    zip_col = _find_col(headers, ["Zip", "Zip Code", "Postal Code"])
 
-        # Always write display address into address column.
-        ws.cell(row=row_idx, column=address_col, value=address)
-        updated_fields.append("Address")
+    if city and city_col:
+        ws.cell(row=row_idx, column=city_col, value=city)
+        updated_fields.append("City")
 
-        # Pre-fill city/state/zip if columns exist.
-        city_col = _find_col(headers, ["City"])
-        state_col = _find_col(headers, ["State"])
-        zip_col = _find_col(headers, ["Zip", "Zip Code", "Postal Code"])
+    if state and state_col:
+        ws.cell(row=row_idx, column=state_col, value=state)
+        updated_fields.append("State")
 
-        if city and city_col:
-            ws.cell(row=row_idx, column=city_col, value=city)
-            updated_fields.append("City")
+    if zip_code and zip_col:
+        ws.cell(row=row_idx, column=zip_col, value=zip_code)
+        updated_fields.append("Zip")
 
-        if state and state_col:
-            ws.cell(row=row_idx, column=state_col, value=state)
-            updated_fields.append("State")
+    for header_key, col_idx in headers.items():
+        if col_idx == address_col:
+            continue
 
-        if zip_code and zip_col:
-            ws.cell(row=row_idx, column=zip_col, value=zip_code)
-            updated_fields.append("Zip")
+        aliases = _field_aliases_for_header(header_key)
+        value = None
 
-        # Write any labeled email fields whose labels match workbook headers.
-        for header_key, col_idx in headers.items():
-            if col_idx == address_col:
-                continue
+        for alias in aliases:
+            if _norm(alias) in fields:
+                value = fields[_norm(alias)]
+                break
 
-            aliases = _field_aliases_for_header(header_key)
-            value = None
+        if value is None or value == "":
+            continue
 
-            for alias in aliases:
-                if _norm(alias) in fields:
-                    value = fields[_norm(alias)]
-                    break
+        ws.cell(row=row_idx, column=col_idx, value=value)
+        updated_fields.append(str(ws.cell(row=header_row, column=col_idx).value or header_key))
 
-            if value is None or value == "":
-                continue
+    timestamp_col = _find_col(
+        headers,
+        ["Last Updated", "Updated", "Last Updated UTC", "Updated UTC"],
+    )
 
-            ws.cell(row=row_idx, column=col_idx, value=value)
-            updated_fields.append(str(ws.cell(row=header_row, column=col_idx).value or header_key))
+    if timestamp_col:
+        ws.cell(row=row_idx, column=timestamp_col, value=datetime.utcnow().isoformat())
+        updated_fields.append("Last Updated")
 
-        # Add a timestamp if workbook has a matching column.
-        timestamp_col = _find_col(
-            headers,
-            ["Last Updated", "Updated", "Last Updated UTC", "Updated UTC"],
-        )
-
-        if timestamp_col:
-            ws.cell(row=row_idx, column=timestamp_col, value=datetime.utcnow().isoformat())
-            updated_fields.append("Last Updated")
-
-        wb.save(local_path)
-        upload_drive_file(file_id, local_path)
+    wb.save(local_path)
 
     return ActiveDealsResult(
         action=action,
@@ -509,3 +552,30 @@ def update_active_deals_from_email(body_text: str) -> ActiveDealsResult:
         match_key=match_key,
         updated_fields=sorted(set(updated_fields)),
     )
+
+
+def update_active_deals_from_email(body_text: str) -> list[ActiveDealsResult]:
+    blocks = parse_active_deal_blocks(body_text)
+
+    if not blocks:
+        blocks = [body_text]
+
+    file_id, file_name = find_latest_active_deals_file()
+    results: list[ActiveDealsResult] = []
+
+    with tempfile.TemporaryDirectory(prefix="active_deals_") as tmp:
+        local_path = Path(tmp) / file_name
+        download_drive_file(file_id, local_path)
+
+        for block in blocks:
+            result = _update_one_active_deal_block(
+                body_text=block,
+                file_id=file_id,
+                file_name=file_name,
+                local_path=local_path,
+            )
+            results.append(result)
+
+        upload_drive_file(file_id, local_path)
+
+    return results
