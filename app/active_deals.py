@@ -607,9 +607,14 @@ def update_active_deals_from_email(body_text: str) -> list[ActiveDealsResult]:
     results: list[ActiveDealsResult] = []
 
     with tempfile.TemporaryDirectory(prefix="active_deals_") as tmp:
-        local_path = Path(tmp) / file_name
-        download_drive_file(file_id, local_path)
+        safe_file_name = file_name
 
+        if not safe_file_name.lower().endswith((".xlsx", ".xlsm")):
+            safe_file_name = f"{safe_file_name}.xlsx"
+
+        local_path = Path(tmp) / safe_file_name
+        download_drive_file(file_id, local_path)
+        
         for block in blocks:
             result = _update_one_active_deal_block(
                 body_text=block,
