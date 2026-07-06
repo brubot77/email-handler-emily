@@ -13,6 +13,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
@@ -516,6 +517,248 @@ def _first_empty_address_row(ws, header_row: int, address_col: int) -> int:
 
     return ws.max_row + 1
 
+def _safe_sheet_title(value: str) -> str:
+    """
+    Excel sheet names must be <=31 chars and cannot contain:
+    : \ / ? * [ ]
+    """
+
+    title = str(value or "").strip()
+
+    if "," in title:
+        title = title.split(",", 1)[0].strip()
+
+    title = re.sub(r"[:\\/?*\[\]]", " ", title)
+    title = re.sub(r"\s+", " ", title).strip()
+
+    if not title:
+        title = "Property"
+
+    return title[:31]
+
+
+def _unique_sheet_title(wb, desired_title: str) -> str:
+    desired_title = _safe_sheet_title(desired_title)
+
+    if desired_title not in wb.sheetnames:
+        return desired_title
+
+    base = desired_title[:27].rstrip()
+
+    counter = 2
+
+    while True:
+        candidate = f"{base} {counter}"[:31]
+
+        if candidate not in wb.sheetnames:
+            return candidate
+
+        counter += 1
+
+
+def _find_sheet_by_name(wb, candidates: list[str]):
+    normalized_candidates = {_norm(name) for name in candidates}
+
+    for sheet_name in wb.sheetnames:
+        if _norm(sheet_name) in normalized_candidates:
+            return wb[sheet_name]
+
+    return None
+
+
+def _sheet_exists_for_address(wb, address: str) -> bool:
+    incoming_key = normalize_address_match_key(address)
+
+    if not incoming_key:
+        return False
+
+    for sheet_name in wb.sheetnames:
+        sheet_key = normalize_address_match_key(sheet_name)
+
+        if sheet_key and sheet_key == incoming_key:
+            return True
+
+    return False
+
+
+def _excel_col_letter(col_idx: int) -> str:
+    letters = ""
+
+    while col_idx:
+        col_idx, remainder = divmod(col_idx - 1, 26)
+        letters = chr(65 + remainder) + letters
+
+    return letters
+
+
+def _get_cell_ref(sheet_name: str, row_idx: int, col_idx: int | None) -> str:
+    if not col_idx:
+        return '""'
+
+    col_letter = _excel_col_letter(col_idx)
+    safe_sheet_name = sheet_name.replace("'", "''")
+
+    return f"'{safe_sheet_name}'!{col_letter}{row_idx}"
+
+
+def _build_property_underwriting_tab(
+    wb,
+    active_ws,
+    header_row: int,
+    headers: dict[str, int],
+    row_idx: int,
+    address: str,
+) -> None:
+    if _sheet_exists_for_address(wb, address):
+        return
+
+    sheet_title = _unique_sheet_title(wb, address)
+    ws = wb.create_sheet(sheet_title)
+
+    active_sheet_name = active_ws.title
+
+    header_fill = PatternFill("solid", fgColor="D9EAD3")
+    section_fill = PatternFill("solid", fgColor="CFE2F3")
+    bold = Font(bold=True)
+
+    ws["A1"] = "Shannon Underwriting"
+    ws["A1"].font = Font(bold=True, size=14)
+
+    ws["A3"] = "Property"
+    ws["A3"].font = bold
+    ws["B3"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['Address', 'Property Address', 'Property', 'Street Address']))}"
+
+    ws["A4"] = "City"
+    ws["B4"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['City']))}"
+
+    ws["A5"] = "Status"
+    ws["B5"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['Status', 'Offer Status']))}"
+
+    ws["A6"] = "Notes"
+    ws["B6"] = f"={_get_cell_ref(active_sheet_name, row_idx, _find_col(headers, ['Notes', 'Comments']))}"
+
+    ws["A8"] = "Inputs"
+    ws["A8"].fill = section_fill
+    ws["A8"].font = bold
+
+    input_rows = [
+        ("Purchase Price", ["Price", "Asking Price", "Purchase Price", "Offer Price"]),
+        ("Rehab Budget", ["Rehab", "Rehab Budget", "Repairs", "Repair Budget"]),
+        ("Monthly Rent", ["Rent", "Monthly Rent", "Zest Rent", "Market Rent", "BLU Rent Est"]),
+        ("Taxes / Month", ["Taxes", "Monthly Taxes", "Tax"]),
+        ("Insurance / Month", ["Insurance", "Monthly Insurance"]),
+        ("Mgmt / Month", ["Management", "Mgmt", "Property Management"]),
+        ("Vacancy / Month", ["Vacancy"]),
+        ("Maintenance / Month", ["Maintenance", "Repairs Reserve"]),
+        ("Mortgage / Month", ["Mortgage", "Debt Service", "Monthly Mortgage", "Payment"]),
+    ]
+
+    start_row = 9
+
+    for offset, (label, candidates) in enumerate(input_rows):
+        row = start_row + offset
+        col_idx = _find_col(headers, candidates)
+
+        ws.cell(row=row, column=1, value=label)
+        ws.cell(row=row, column=1).font = bold
+
+        if col_idx:
+            ws.cell(row=row, column=2, value=f"={_get_cell_ref(active_sheet_name, row_idx, col_idx)}")
+        else:
+            ws.cell(row=row, column=2, value=0)
+
+    ws["D8"] = "Shannon Logic"
+    ws["D8"].fill = section_fill
+    ws["D8"].font = bold
+
+    formulas = [
+        ("All-In Cost", "=SUM(B9:B10)"),
+        ("Annual Rent", "=B11*12"),
+        ("Monthly Operating Expenses", "=SUM(B12:B16)"),
+        ("NOI Before Debt", "=B11-D11"),
+        ("Annual NOI Before Debt", "=D12*12"),
+        ("Monthly Cashflow After Debt", "=D12-B17"),
+        ("Annual Cashflow After Debt", "=D14*12"),
+        ("Rent / All-In Cost", '=IFERROR(B11/D9,"")'),
+        ("Cash-on-Cash Placeholder", ""),
+        ("DSCR Placeholder", '=IFERROR(D12/B17,"")'),
+    ]
+
+    for offset, (label, formula) in enumerate(formulas):
+        row = start_row + offset
+        ws.cell(row=row, column=4, value=label)
+        ws.cell(row=row, column=4).font = bold
+        ws.cell(row=row, column=5, value=formula)
+
+    ws["A21"] = "Source"
+    ws["A21"].font = bold
+    ws["B21"] = "Auto-created by Emily from BLU Active Deals"
+
+    ws["A22"] = "Active Deals Row"
+    ws["A22"].font = bold
+    ws["B22"] = row_idx
+
+    for col in ["A", "B", "D", "E"]:
+        ws.column_dimensions[col].width = 24
+
+    ws["B6"].alignment = Alignment(wrap_text=True)
+
+    for cell in ws[8]:
+        cell.font = bold
+
+    # Currency formatting
+    for cell_ref in ["B9", "B10", "B11", "B12", "B13", "B14", "B15", "B16", "B17", "E9", "E11", "E12", "E13", "E14", "E15"]:
+        ws[cell_ref].number_format = '$#,##0.00;[Red]($#,##0.00)'
+
+    for cell_ref in ["E16", "E18"]:
+        ws[cell_ref].number_format = '0.00%'
+
+
+def ensure_property_underwriting_tabs(wb) -> int:
+    """
+    Check the Active Deals tab and ensure every property row has an individual tab.
+    """
+
+    active_ws = _find_sheet_by_name(wb, ["Active Deals", "BLU Active Deals"])
+
+    if active_ws is None:
+        active_ws = wb.active
+
+    header_row, headers = _find_header_row_and_map(active_ws)
+
+    address_col = _find_col(
+        headers,
+        ["Address", "Property Address", "Property", "Street Address"],
+    )
+
+    if address_col is None:
+        raise ValueError("Active Deals tab does not have an Address/Property column")
+
+    created_count = 0
+
+    for row_idx in range(header_row + 1, active_ws.max_row + 1):
+        address = active_ws.cell(row=row_idx, column=address_col).value
+        address = str(address or "").strip()
+
+        if not address:
+            continue
+
+        if _sheet_exists_for_address(wb, address):
+            continue
+
+        _build_property_underwriting_tab(
+            wb=wb,
+            active_ws=active_ws,
+            header_row=header_row,
+            headers=headers,
+            row_idx=row_idx,
+            address=address,
+        )
+
+        created_count += 1
+
+    return created_count
+
 def _update_one_active_deal_block(
     body_text: str,
     file_id: str,
@@ -534,7 +777,10 @@ def _update_one_active_deal_block(
         raise ValueError(f"Could not build address match key for: {address}")
 
     wb = load_workbook(local_path)
-    ws = wb.active
+    ws = _find_sheet_by_name(wb, ["Active Deals", "BLU Active Deals"])
+
+    if ws is None:
+        ws = wb.active
 
     header_row, headers = _find_header_row_and_map(ws)
 
@@ -639,6 +885,13 @@ def update_active_deals_from_email(body_text: str) -> list[ActiveDealsResult]:
             )
             results.append(result)
 
-        upload_drive_file(file_id, local_path)
+        wb = load_workbook(local_path)
+        created_tab_count = ensure_property_underwriting_tabs(wb)
+        wb.save(local_path)
 
+        if created_tab_count:
+            print(f"Created {created_tab_count} missing Active Deals property underwriting tab(s)")
+
+        upload_drive_file(file_id, local_path)
+    
     return results
