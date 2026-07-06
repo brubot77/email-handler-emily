@@ -1009,6 +1009,18 @@ def _format_and_hide_property_tab_columns(
         "Monthly Maintenance $",
         "Monthly Mgmt $",
         "Monthly Tax $",
+        "Monthly Insurance $",
+        "Monthly Operating Expenses $",
+        "Monthly Cashflow Est",
+        "NOI Annual Est",
+        "Cap Rate Est",
+        "Rent Cache Hit",
+        "Tax Cache Hit",
+        "Rent Last Checked UTC",
+        "Tax Last Checked UTC",
+        "Tax Year",
+        "Tax Source",
+        "Last Reviewed UTC",
     ]
 
     for header in headers_to_hide:
