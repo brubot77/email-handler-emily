@@ -265,17 +265,17 @@ def canonical_property_key(
     zip_code: str | None = "",
 ) -> str:
     """
-    Street-only canonical key for property_state.json.
+    Loose street-only canonical key for property_state.json.
 
     City/state/ZIP intentionally do not matter.
-    Street suffixes are removed so these all match:
-      1317 N Madison
-      1317 N Madison St
-      1317 N Madison Ave.
-      1317 N Madison, Wichita, KS 67214
+    Directionals and street suffixes are removed so these all match:
+      2026 N Arkansas Ave
+      2026 Arkansas
+      2026 Arkansas St
+      2026 S Arkansas Blvd
 
     Result:
-      1317 n madison
+      2026 arkansas
     """
 
     text = str(address or "").strip().lower()
@@ -285,29 +285,33 @@ def canonical_property_key(
         text = text.split(",", 1)[0]
 
     # Cut off accidentally swallowed labeled fields.
-    text = re.split(r"\bstatus\s*:|\bzest rent\s*:|\bnotes\s*:", text, flags=re.IGNORECASE)[0]
+    text = re.split(
+        r"\bstatus\s*:|\bzest rent\s*:|\bnotes\s*:",
+        text,
+        flags=re.IGNORECASE,
+    )[0]
 
     # Remove city/state/ZIP noise if typed without commas.
     text = re.sub(r"\bwichita\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", text)
 
-    # Remove punctuation.
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-
     # Remove unit/apartment info.
     text = re.sub(r"\b(apartment|apt|unit|ste|suite)\s+\w+\b", " ", text)
 
-    replacements = {
-        "north": "n",
-        "south": "s",
-        "east": "e",
-        "west": "w",
+    # Remove punctuation.
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+
+    direction_words = {
+        "n", "s", "e", "w",
+        "ne", "nw", "se", "sw",
+        "north", "south", "east", "west",
+        "northeast", "northwest", "southeast", "southwest",
     }
 
     street_suffixes = {
         "street", "st",
-        "avenue", "ave",
+        "avenue", "ave", "av",
         "road", "rd",
         "drive", "dr",
         "lane", "ln",
@@ -318,13 +322,15 @@ def canonical_property_key(
         "parkway", "pkwy",
         "circle", "cir",
         "trail", "trl",
+        "highway", "hwy",
         "way",
     }
 
     words = []
 
     for word in text.split():
-        word = replacements.get(word, word)
+        if word in direction_words:
+            continue
 
         if word in street_suffixes:
             continue
@@ -336,6 +342,33 @@ def canonical_property_key(
 
     return text
 
+
+def find_existing_property_state_key(
+    property_state: dict,
+    property_key: str,
+) -> str | None:
+    """
+    Finds an existing property_state key using the new loose address rules.
+
+    This prevents duplicate records when old saved keys still contain a
+    direction, such as "2026 n arkansas", but the new update email says
+    "2026 Arkansas".
+    """
+
+    if property_key in property_state:
+        return property_key
+
+    for existing_key, state_entry in property_state.items():
+        if canonical_property_key(existing_key) == property_key:
+            return existing_key
+
+        if isinstance(state_entry, dict):
+            display_address = state_entry.get("display_address", "")
+
+            if canonical_property_key(display_address) == property_key:
+                return existing_key
+
+    return None
 
 def load_property_state() -> dict:
     if not PROPERTY_STATE_PATH.exists():
@@ -540,9 +573,24 @@ def handle_address_update_request(
             continue
 
         property_key = canonical_property_key(address)
-        state_entry = property_state.get(property_key)
+        existing_property_key = find_existing_property_state_key(
+            property_state,
+            property_key,
+        )
 
-        if state_entry is None:
+        if existing_property_key:
+            state_entry = property_state[existing_property_key]
+
+            # Migrate old saved keys, such as "2026 n arkansas", to the
+            # new loose key, such as "2026 arkansas".
+            if existing_property_key != property_key:
+                property_state[property_key] = property_state.pop(existing_property_key)
+                state_entry = property_state[property_key]
+                print(
+                    f"{message_id}: migrated property key "
+                    f"{existing_property_key} -> {property_key}"
+                )
+        else:
             state_entry = {
                 "display_address": address,
                 "status": "Under Review",
