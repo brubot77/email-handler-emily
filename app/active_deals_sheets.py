@@ -686,6 +686,183 @@ def _write_values(sheets, spreadsheet_id: str, range_name: str, values: list[lis
         body={"values": values},
     ).execute()
 
+def _execute_with_retry(request, description: str = "Google API request"):
+    """
+    Handle temporary Google API rate limits.
+
+    Main fix is batching, but this gives us a safety net.
+    """
+    for attempt in range(6):
+        try:
+            return request.execute()
+        except HttpError as exc:
+            status = getattr(exc.resp, "status", None)
+
+            if status in {429, 500, 502, 503, 504} and attempt < 5:
+                sleep_seconds = min(60, 5 * (attempt + 1))
+                print(f"{description} rate-limited; sleeping {sleep_seconds}s then retrying")
+                time.sleep(sleep_seconds)
+                continue
+
+            raise
+
+
+def _write_values_batch(
+    sheets,
+    spreadsheet_id: str,
+    updates: list[tuple[str, Any]],
+) -> None:
+    """
+    Batch multiple cell formula/value updates into one Sheets API write request.
+    """
+
+    if not updates:
+        return
+
+    data = [
+        {
+            "range": range_name,
+            "values": [[value]],
+        }
+        for range_name, value in updates
+    ]
+
+    request = sheets.spreadsheets().values().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            "valueInputOption": "USER_ENTERED",
+            "data": data,
+        },
+    )
+
+    _execute_with_retry(request, "Sheets values batchUpdate")
+
+
+def _batch_sheet_requests(
+    sheets,
+    spreadsheet_id: str,
+    requests: list[dict],
+    description: str = "Sheets batchUpdate",
+) -> None:
+    """
+    Batch format/hide/protection requests into one Sheets API write request.
+    """
+
+    if not requests:
+        return
+
+    request = sheets.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={"requests": requests},
+    )
+
+    _execute_with_retry(request, description)
+
+
+def _format_column_request(
+    sheet_id: int,
+    col_1based: int,
+    number_format_type: str,
+    pattern: str,
+) -> dict:
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0,
+                "endRowIndex": 1000,
+                "startColumnIndex": col_1based - 1,
+                "endColumnIndex": col_1based,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "numberFormat": {
+                        "type": number_format_type,
+                        "pattern": pattern,
+                    }
+                }
+            },
+            "fields": "userEnteredFormat.numberFormat",
+        }
+    }
+
+
+def _format_cell_request(
+    sheet_id: int,
+    row_1based: int,
+    col_1based: int,
+    number_format_type: str,
+    pattern: str,
+) -> dict:
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": row_1based - 1,
+                "endRowIndex": row_1based,
+                "startColumnIndex": col_1based - 1,
+                "endColumnIndex": col_1based,
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "numberFormat": {
+                        "type": number_format_type,
+                        "pattern": pattern,
+                    }
+                }
+            },
+            "fields": "userEnteredFormat.numberFormat",
+        }
+    }
+
+
+def _hide_column_request(sheet_id: int, col_1based: int) -> dict | None:
+    """
+    Never hide A or B.
+    """
+
+    if col_1based <= 2:
+        return None
+
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": col_1based - 1,
+                "endIndex": col_1based,
+            },
+            "properties": {
+                "hiddenByUser": True,
+            },
+            "fields": "hiddenByUser",
+        }
+    }
+
+
+def _protect_range_request(
+    sheet_id: int,
+    start_row_1based: int,
+    end_row_1based_inclusive: int,
+    start_col_1based: int,
+    end_col_1based_inclusive: int,
+    description: str,
+) -> dict:
+    return {
+        "addProtectedRange": {
+            "protectedRange": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": start_row_1based - 1,
+                    "endRowIndex": end_row_1based_inclusive,
+                    "startColumnIndex": start_col_1based - 1,
+                    "endColumnIndex": end_col_1based_inclusive,
+                },
+                "description": description,
+                "warningOnly": True,
+            }
+        }
+    }
 
 def _delete_existing_protections_by_description(
     sheets,
@@ -914,7 +1091,7 @@ def _format_and_hide_property_tab_columns(
 ) -> None:
     """
     Apply user-friendly formatting and hide less-used Shannon detail columns
-    on individual property tabs.
+    on individual property tabs using one batched Sheets API request.
     """
 
     headers = _find_header_columns_in_values(shannon_values)
@@ -922,6 +1099,8 @@ def _format_and_hide_property_tab_columns(
     if not headers:
         print("Could not find Shannon headers for property tab formatting")
         return
+
+    requests: list[dict] = []
 
     percent_headers = [
         "Interest Rate",
@@ -963,26 +1142,26 @@ def _format_and_hide_property_tab_columns(
         col_idx = _find_col(headers, [header])
 
         if col_idx:
-            _format_column(
-                sheets=sheets,
-                spreadsheet_id=spreadsheet_id,
-                sheet_id=property_sheet_id,
-                col_1based=col_idx,
-                number_format_type="PERCENT",
-                pattern="0.00%",
+            requests.append(
+                _format_column_request(
+                    sheet_id=property_sheet_id,
+                    col_1based=col_idx,
+                    number_format_type="PERCENT",
+                    pattern="0.00%",
+                )
             )
 
     for header in currency_headers:
         col_idx = _find_col(headers, [header])
 
         if col_idx:
-            _format_column(
-                sheets=sheets,
-                spreadsheet_id=spreadsheet_id,
-                sheet_id=property_sheet_id,
-                col_1based=col_idx,
-                number_format_type="CURRENCY",
-                pattern="$#,##0.00;[Red]($#,##0.00)",
+            requests.append(
+                _format_column_request(
+                    sheet_id=property_sheet_id,
+                    col_1based=col_idx,
+                    number_format_type="CURRENCY",
+                    pattern="$#,##0.00;[Red]($#,##0.00)",
+                )
             )
 
     headers_to_hide = [
@@ -1027,12 +1206,20 @@ def _format_and_hide_property_tab_columns(
         col_idx = _find_col(headers, [header])
 
         if col_idx:
-            _hide_column(
-                sheets=sheets,
-                spreadsheet_id=spreadsheet_id,
+            request = _hide_column_request(
                 sheet_id=property_sheet_id,
                 col_1based=col_idx,
             )
+
+            if request:
+                requests.append(request)
+
+    _batch_sheet_requests(
+        sheets=sheets,
+        spreadsheet_id=spreadsheet_id,
+        requests=requests,
+        description="Format/hide property tab columns",
+    )
 
 def _link_property_tab_formulas(
     sheets,
@@ -1102,58 +1289,58 @@ def _link_property_tab_formulas(
             formula,
         ))
 
-    for range_name, value in formula_updates:
-        _write_values(
-            sheets,
-            spreadsheet_id,
-            range_name,
-            [[value]],
-        )
+    _write_values_batch(
+        sheets=sheets,
+        spreadsheet_id=spreadsheet_id,
+        updates=formula_updates,
+    )
 
-    # Native Google Sheets number formats.
+    # Native Google Sheets number formats and protected ranges.
+    requests: list[dict] = []
+
     # Property tab:
-    #   B5 = down payment %
-    #   O16 = price $
+    #   B5 = Down Payment %
+    #   O16 = Price
     #   P16 = Cash on Cash %
-    #   AG16 = Rehab Cost Override $
-    _format_cell(
-        sheets,
-        spreadsheet_id,
-        property_sheet_id,
-        5,
-        2,
-        "PERCENT",
-        "0.00%",
+    #   AG16 = Rehab Cost Override
+    requests.append(
+        _format_cell_request(
+            sheet_id=property_sheet_id,
+            row_1based=5,
+            col_1based=2,
+            number_format_type="PERCENT",
+            pattern="0.00%",
+        )
     )
 
-    _format_cell(
-        sheets,
-        spreadsheet_id,
-        property_sheet_id,
-        16,
-        15,
-        "CURRENCY",
-        "$#,##0.00;[Red]($#,##0.00)",
+    requests.append(
+        _format_cell_request(
+            sheet_id=property_sheet_id,
+            row_1based=16,
+            col_1based=15,
+            number_format_type="CURRENCY",
+            pattern="$#,##0.00;[Red]($#,##0.00)",
+        )
     )
 
-    _format_cell(
-        sheets,
-        spreadsheet_id,
-        property_sheet_id,
-        16,
-        16,
-        "PERCENT",
-        "0.00%",
+    requests.append(
+        _format_cell_request(
+            sheet_id=property_sheet_id,
+            row_1based=16,
+            col_1based=16,
+            number_format_type="PERCENT",
+            pattern="0.00%",
+        )
     )
 
-    _format_cell(
-        sheets,
-        spreadsheet_id,
-        property_sheet_id,
-        16,
-        33,
-        "CURRENCY",
-        "$#,##0.00;[Red]($#,##0.00)",
+    requests.append(
+        _format_cell_request(
+            sheet_id=property_sheet_id,
+            row_1based=16,
+            col_1based=33,
+            number_format_type="CURRENCY",
+            pattern="$#,##0.00;[Red]($#,##0.00)",
+        )
     )
 
     # Active Deals:
@@ -1161,110 +1348,115 @@ def _link_property_tab_formulas(
     #   ConC = %
     #   Annual Cashflow = $
     if cash_left_col:
-        _format_cell(
-            sheets,
-            spreadsheet_id,
-            active_sheet_id,
-            active_row_idx,
-            cash_left_col,
-            "CURRENCY",
-            "$#,##0.00;[Red]($#,##0.00)",
+        requests.append(
+            _format_cell_request(
+                sheet_id=active_sheet_id,
+                row_1based=active_row_idx,
+                col_1based=cash_left_col,
+                number_format_type="CURRENCY",
+                pattern="$#,##0.00;[Red]($#,##0.00)",
+            )
         )
 
     if conc_col:
-        _format_cell(
-            sheets,
-            spreadsheet_id,
-            active_sheet_id,
-            active_row_idx,
-            conc_col,
-            "PERCENT",
-            "0.00%",
+        requests.append(
+            _format_cell_request(
+                sheet_id=active_sheet_id,
+                row_1based=active_row_idx,
+                col_1based=conc_col,
+                number_format_type="PERCENT",
+                pattern="0.00%",
+            )
         )
 
     if annual_cashflow_col:
-        _format_cell(
-            sheets,
-            spreadsheet_id,
-            active_sheet_id,
-            active_row_idx,
-            annual_cashflow_col,
-            "CURRENCY",
-            "$#,##0.00;[Red]($#,##0.00)",
+        requests.append(
+            _format_cell_request(
+                sheet_id=active_sheet_id,
+                row_1based=active_row_idx,
+                col_1based=annual_cashflow_col,
+                number_format_type="CURRENCY",
+                pattern="$#,##0.00;[Red]($#,##0.00)",
+            )
         )
-        
-    # Native Google Sheets protected ranges.
-    # Property tab locked formula cells: B5, O16.
-    _protect_range(
-        sheets,
-        spreadsheet_id,
-        property_sheet_id,
-        5,
-        5,
-        2,
-        2,
-        f"Emily protected down payment formula for {property_sheet_name}",
+
+    # Protected formula cells.
+    requests.append(
+        _protect_range_request(
+            sheet_id=property_sheet_id,
+            start_row_1based=5,
+            end_row_1based_inclusive=5,
+            start_col_1based=2,
+            end_col_1based_inclusive=2,
+            description=f"Emily protected down payment formula for {property_sheet_name}",
+        )
     )
 
-    _protect_range(
-        sheets,
-        spreadsheet_id,
-        property_sheet_id,
-        16,
-        16,
-        15,
-        15,
-        f"Emily protected price formula for {property_sheet_name}",
+    requests.append(
+        _protect_range_request(
+            sheet_id=property_sheet_id,
+            start_row_1based=16,
+            end_row_1based_inclusive=16,
+            start_col_1based=15,
+            end_col_1based_inclusive=15,
+            description=f"Emily protected price formula for {property_sheet_name}",
+        )
     )
 
     if rehab_est_col:
-        _protect_range(
-            sheets,
-            spreadsheet_id,
-            property_sheet_id,
-            16,
-            16,
-            33,
-            33,
-            f"Emily protected rehab override formula for {property_sheet_name}",
+        requests.append(
+            _protect_range_request(
+                sheet_id=property_sheet_id,
+                start_row_1based=16,
+                end_row_1based_inclusive=16,
+                start_col_1based=33,
+                end_col_1based_inclusive=33,
+                description=f"Emily protected rehab override formula for {property_sheet_name}",
+            )
         )
 
-    # Active Deals locked formula cells: Cash Left, ConC, Annual Cashflow.
     if cash_left_col:
-        _protect_range(
-            sheets,
-            spreadsheet_id,
-            active_sheet_id,
-            active_row_idx,
-            active_row_idx,
-            cash_left_col,
-            cash_left_col,
-            f"Emily protected Cash Left formula for {property_sheet_name}",
+        requests.append(
+            _protect_range_request(
+                sheet_id=active_sheet_id,
+                start_row_1based=active_row_idx,
+                end_row_1based_inclusive=active_row_idx,
+                start_col_1based=cash_left_col,
+                end_col_1based_inclusive=cash_left_col,
+                description=f"Emily protected Cash Left formula for {property_sheet_name}",
+            )
         )
 
     if conc_col:
-        _protect_range(
-            sheets,
-            spreadsheet_id,
-            active_sheet_id,
-            active_row_idx,
-            active_row_idx,
-            conc_col,
-            conc_col,
-            f"Emily protected ConC formula for {property_sheet_name}",
+        requests.append(
+            _protect_range_request(
+                sheet_id=active_sheet_id,
+                start_row_1based=active_row_idx,
+                end_row_1based_inclusive=active_row_idx,
+                start_col_1based=conc_col,
+                end_col_1based_inclusive=conc_col,
+                description=f"Emily protected ConC formula for {property_sheet_name}",
+            )
         )
 
     if annual_cashflow_col:
-        _protect_range(
-            sheets,
-            spreadsheet_id,
-            active_sheet_id,
-            active_row_idx,
-            active_row_idx,
-            annual_cashflow_col,
-            annual_cashflow_col,
-            f"Emily protected Annual Cashflow formula for {property_sheet_name}",
+        requests.append(
+            _protect_range_request(
+                sheet_id=active_sheet_id,
+                start_row_1based=active_row_idx,
+                end_row_1based_inclusive=active_row_idx,
+                start_col_1based=annual_cashflow_col,
+                end_col_1based_inclusive=annual_cashflow_col,
+                description=f"Emily protected Annual Cashflow formula for {property_sheet_name}",
+            )
         )
+
+    _batch_sheet_requests(
+        sheets=sheets,
+        spreadsheet_id=spreadsheet_id,
+        requests=requests,
+        description="Format/protect linked formula cells",
+    )
 
 
 def _create_shannon_property_tab(
