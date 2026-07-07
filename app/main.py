@@ -765,32 +765,40 @@ def handle_active_deals_request(
     message_id = message["id"]
     body_text = decode_message_body(message)
 
-    if not body_text.strip():
+    # Subject "active deals" with no real update data should run the tab-check-only flow.
+    # Some blank emails decode as non-empty because Gmail may include hidden HTML,
+    # quoted text, signatures, or formatting artifacts.
+    body_for_update = (body_text or "").strip()
+
+    has_active_deal_update_data = bool(
+        re.search(
+            r"(?im)^\s*(address|status|status update|zest rent|notes|latest offer|rehab est|appraisal est)\s*:",
+            body_for_update,
+        )
+        or re.search(
+            r"(?im)^\s*\d{2,6}\s+(?:[NSEW]\.?\s+|North\s+|South\s+|East\s+|West\s+)?[A-Za-z0-9.'-]+",
+            body_for_update,
+        )
+    )
+
+    if not has_active_deal_update_data:
         try:
             created_tab_count = ensure_active_deals_tabs_only()
         except Exception as exc:
             print(f"{message_id}: Active Deals tab check failed -> {exc}")
-            gmail.mark_failed(message_id, failed_label_id)
-            return True
+            return False
 
         print(
-            f"{message_id}: Active Deals email had blank body; "
+            f"{message_id}: Active Deals email had no usable update body; "
             f"created {created_tab_count} missing property underwriting tab(s)"
         )
-
-        gmail.mark_processed_and_archive(
-            message_id,
-            processed_label_id,
-        )
-
         return True
 
     try:
         results = update_active_deals_from_email(body_text)
     except Exception as exc:
         print(f"{message_id}: Active Deals update failed -> {exc}")
-        gmail.mark_failed(message_id, failed_label_id)
-        return True
+        return False
 
     for result in results:
         print(
