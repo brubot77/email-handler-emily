@@ -15,7 +15,7 @@ from .pdf_parser import extract_pdf_text
 from .workspace import MorganWorkspace, sha256_file
 
 INGEST_SUBJECTS = {"morgan", "document tracking", "closing statement", "refi statement", "refinance statement", "settlement statement", "closing documents", "refi documents", "property statement", "refi"}
-COMMAND_PREFIXES = ("morgan retrieve", "morgan status", "morgan missing", "morgan setup")
+COMMAND_PREFIXES = ("morgan retrieve", "morgan status", "morgan missing", "morgan setup", "morgan review")
 
 
 def _iter_parts(payload: dict):
@@ -196,6 +196,147 @@ def process_ingest(message: dict, gmail, ws: MorganWorkspace) -> tuple[bool, str
     return True, f"Processed {processed} PDF(s); {review} need review; {duplicates} duplicate(s) skipped"
 
 
+
+def _handle_review(message: dict, gmail, ws: MorganWorkspace) -> tuple[bool, str]:
+    """Reprocess unresolved Drive PDFs after Property Master has been updated."""
+    query = get_subject(message) + "\n" + _body_text(message)
+    requested_document_id = _capture_value(query, "Document ID").upper()
+    requested_llc = _capture_value(query, "LLC").upper()
+    master = ws.property_master()
+    if not master:
+        detail = "Property Master has no usable Address + LLC rows. No documents were reviewed."
+        _reply_text(gmail, message, detail, "Morgan Review Results")
+        return False, detail
+
+    register_rows = {record.get("Document ID", ""): (row_no, record, values) for row_no, record, values in ws.row_dicts("Document Register")}
+    review_rows = ws.row_dicts("Needs Review")
+    reviewed = resolved = still_review = skipped = 0
+    details: list[str] = []
+    now = dt.datetime.now(dt.UTC).isoformat()
+
+    for review_row_no, review_record, review_values in review_rows:
+        document_id = review_record.get("Document ID", "").upper()
+        if requested_document_id and document_id != requested_document_id:
+            continue
+        if review_record.get("Resolution", "").strip():
+            continue
+        register_item = register_rows.get(document_id)
+        if not register_item:
+            skipped += 1
+            details.append(f"{document_id}: skipped; Document Register row not found")
+            continue
+        register_row_no, register, register_values = register_item
+        if requested_llc and requested_llc not in register.get("Ownership Entity", "").upper() and requested_llc not in review_record.get("Reason", "").upper():
+            # We cannot know the LLC until matching; allow records with unknown entity to continue.
+            if register.get("Ownership Entity", "").strip() not in {"", "Unknown LLC"}:
+                continue
+        file_id = register.get("Google Drive File ID", "").strip()
+        if not file_id:
+            skipped += 1
+            details.append(f"{document_id}: skipped; Drive file ID missing")
+            continue
+
+        reviewed += 1
+        with tempfile.TemporaryDirectory(prefix="morgan_review_") as temp_dir:
+            local_path = Path(temp_dir) / safe_filename(register.get("Original Filename") or f"{document_id}.pdf")
+            try:
+                ws.download_file(file_id, local_path)
+                text = extract_pdf_text(local_path)
+                analysis = analyze_document(text)
+            except Exception as exc:
+                still_review += 1
+                details.append(f"{document_id}: could not reopen/analyze PDF: {exc}")
+                continue
+
+        matched = []
+        unmatched = []
+        seen_keys = set()
+        for extracted in analysis.addresses:
+            key = canonical_property_key(extracted)
+            if key in master and key not in seen_keys:
+                matched.append(master[key])
+                seen_keys.add(key)
+            elif key:
+                unmatched.append(extracted)
+        if not matched:
+            for possible in review_record.get("Possible Addresses", "").split(" | "):
+                key = canonical_property_key(possible)
+                if key in master and key not in seen_keys:
+                    matched.append(master[key])
+                    seen_keys.add(key)
+        if not matched:
+            file_key = canonical_property_key(register.get("Original Filename", ""))
+            if file_key in master:
+                matched.append(master[file_key])
+                seen_keys.add(file_key)
+
+        if requested_llc:
+            matched = [prop for prop in matched if prop.llc.upper() == requested_llc]
+
+        file_url = register.get("Google Drive File", "")
+        review_status = "Complete" if matched and analysis.classification_confidence >= 70 and analysis.date_confidence > 0 else "Needs Review"
+        llcs = sorted({prop.llc for prop in matched})
+        addresses_display = " | ".join(prop.address for prop in matched) or " | ".join(analysis.addresses)
+
+        headers = ws.values("Document Register")[0]
+        idx = {h: i for i, h in enumerate(headers)}
+        def set_register(name: str, value) -> None:
+            if name in idx:
+                register_values[idx[name]] = value
+        set_register("Document Scope", "Multiple Properties" if len(matched) > 1 else "Single Property")
+        set_register("Primary Property Address", matched[0].address if len(matched) == 1 else "")
+        set_register("Ownership Entity", " | ".join(llcs) if llcs else "Unknown LLC")
+        set_register("Property Count", len(matched) or len(analysis.addresses))
+        set_register("Property Addresses", addresses_display)
+        set_register("Transaction Date", analysis.transaction_date)
+        set_register("Document Type", analysis.document_type)
+        set_register("Document Subtype", analysis.document_subtype)
+        set_register("Lender", analysis.lender)
+        set_register("Title Company", analysis.title_company)
+        set_register("Borrower", analysis.borrower)
+        set_register("Purchase Price", analysis.purchase_price)
+        set_register("New Loan Amount", analysis.new_loan_amount)
+        set_register("Prior Loan Payoff", analysis.prior_loan_payoff)
+        set_register("Cash to Borrower", analysis.cash_to_borrower)
+        set_register("Interest Rate", analysis.interest_rate)
+        set_register("Loan Term", analysis.loan_term)
+        set_register("Classification Confidence", analysis.classification_confidence)
+        set_register("Date Confidence", analysis.date_confidence)
+        set_register("Classification Reason", analysis.classification_reason)
+        set_register("Review Status", review_status)
+        ws.update_row("Document Register", register_row_no, register_values)
+
+        for prop in matched:
+            if not ws.has_property_link(document_id, prop.canonical_key):
+                page_ref = analysis.page_references.get(prop.address, "")
+                ws.append("Document Property Links", [document_id, prop.address, prop.canonical_key, prop.llc, analysis.document_type, analysis.transaction_date, page_ref, file_url, 100, review_status])
+            if "refinance" in analysis.document_type.lower() and not ws.has_refinance_history(document_id, prop.canonical_key):
+                page_ref = analysis.page_references.get(prop.address, "")
+                ws.append("Refinance History", [document_id, prop.address, prop.llc, analysis.transaction_date, analysis.lender, analysis.new_loan_amount, analysis.prior_loan_payoff, analysis.cash_to_borrower, analysis.interest_rate, analysis.loan_term, file_url, page_ref, "Added by Morgan Review"])
+            ws.update_property_status(prop, analysis, file_url, now, is_portfolio=len(matched) > 1)
+
+        review_headers = ws.values("Needs Review")[0]
+        review_idx = {h: i for i, h in enumerate(review_headers)}
+        if matched and review_status == "Complete":
+            review_values[review_idx["Resolution"]] = f"Resolved by Morgan Review: matched {len(matched)} property/properties"
+            review_values[review_idx["Resolved Date"]] = now
+            ws.update_row("Needs Review", review_row_no, review_values)
+            resolved += 1
+            details.append(f"{document_id}: resolved; {addresses_display}")
+        else:
+            reason = analysis.classification_reason
+            if unmatched:
+                reason += f"; unmatched: {', '.join(unmatched)}"
+            review_values[review_idx["Reason"]] = reason
+            ws.update_row("Needs Review", review_row_no, review_values)
+            still_review += 1
+            details.append(f"{document_id}: still needs review; matched {len(matched)}")
+
+    summary = f"Morgan reviewed {reviewed} document(s); {resolved} resolved; {still_review} still need review; {skipped} skipped."
+    result = summary + ("\n\n" + "\n".join(details) if details else "")
+    _reply_text(gmail, message, result, "Morgan Review Results")
+    return True, summary
+
 def handle_morgan_message(message: dict, gmail, token_path: str) -> tuple[bool, bool, str]:
     subject = get_subject(message).strip().lower()
     is_command = subject.startswith(COMMAND_PREFIXES)
@@ -204,7 +345,9 @@ def handle_morgan_message(message: dict, gmail, token_path: str) -> tuple[bool, 
         return False, False, ""
     try:
         ws = _workspace(token_path)
-        if subject.startswith("morgan retrieve") or subject.startswith("morgan status"):
+        if subject.startswith("morgan review"):
+            success, detail = _handle_review(message, gmail, ws)
+        elif subject.startswith("morgan retrieve") or subject.startswith("morgan status"):
             success, detail = _handle_retrieve(message, gmail, ws)
         elif subject.startswith("morgan setup"):
             detail = "Morgan tracker schema is ready. Add Property Address and LLC rows to the Property Master tab."

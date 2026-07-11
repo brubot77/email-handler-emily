@@ -8,7 +8,7 @@ from typing import Any
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 from .addressing import canonical_property_key, normalized_display, safe_filename
 from .models import PropertyRecord, DocumentAnalysis
@@ -107,6 +107,88 @@ class MorganWorkspace:
         media = MediaFileUpload(str(path), mimetype="application/pdf", resumable=False)
         file = self.drive.files().create(body={"name": saved_name, "parents": [parent]}, media_body=media, fields="id,webViewLink").execute()
         return file["id"], file.get("webViewLink") or self.drive_url(file["id"])
+
+
+    def download_file(self, file_id: str, destination: Path) -> Path:
+        request = self.drive.files().get_media(fileId=file_id)
+        with destination.open("wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+        return destination
+
+    def row_dicts(self, tab: str) -> list[tuple[int, dict[str, str], list[Any]]]:
+        rows = self.values(tab)
+        if len(rows) < 2:
+            return []
+        headers = rows[0]
+        output = []
+        for row_number, row in enumerate(rows[1:], start=2):
+            padded = row + [""] * (len(headers) - len(row))
+            output.append((row_number, {h: str(padded[i]) for i, h in enumerate(headers)}, padded[:len(headers)]))
+        return output
+
+    def has_property_link(self, document_id: str, canonical_key: str) -> bool:
+        for _, record, _ in self.row_dicts("Document Property Links"):
+            if record.get("Document ID") == document_id and record.get("Canonical Property Key") == canonical_key:
+                return True
+        return False
+
+    def has_refinance_history(self, document_id: str, canonical_key: str) -> bool:
+        target = canonical_property_key(canonical_key)
+        for _, record, _ in self.row_dicts("Refinance History"):
+            if record.get("Document ID") == document_id and canonical_property_key(record.get("Property Address", "")) == target:
+                return True
+        return False
+
+    def update_property_status(self, prop: PropertyRecord, analysis: DocumentAnalysis, file_url: str, now: str, is_portfolio: bool = False) -> None:
+        rows = self.values("Property Status")
+        headers = rows[0] if rows else SHEETS["Property Status"]
+        idx = {h: i for i, h in enumerate(headers)}
+        target_row = None
+        target_values = None
+        for row_number, record, values in self.row_dicts("Property Status"):
+            if record.get("Canonical Property Key") == prop.canonical_key:
+                target_row, target_values = row_number, values
+                break
+        values = target_values or [""] * len(headers)
+        def put(name: str, value: Any) -> None:
+            if name in idx:
+                values[idx[name]] = value
+        put("Property Address", prop.address)
+        put("Canonical Property Key", prop.canonical_key)
+        put("Current Ownership Entity", prop.llc)
+        put("Active Property", prop.active or "Yes")
+        dtype = analysis.document_type.lower()
+        if "acquisition" in dtype or ("closing" in dtype and "refinance" not in dtype and "sale" not in dtype):
+            put("Acquisition Closing Status", "Complete")
+            put("Acquisition Closing Date", analysis.transaction_date)
+            put("Acquisition Closing File", file_url)
+        if "refinance" in dtype:
+            put("Refi Statement Status", "Complete")
+            put("Latest Refi Date", analysis.transaction_date)
+            put("Latest Refi Lender", analysis.lender)
+            put("Latest Refi File", file_url)
+            current = values[idx["Number of Refi Statements"]] if "Number of Refi Statements" in idx else ""
+            try:
+                count = int(current or 0)
+            except ValueError:
+                count = 0
+            put("Number of Refi Statements", max(1, count))
+        if is_portfolio and "Portfolio Document Count" in idx:
+            try:
+                count = int(values[idx["Portfolio Document Count"]] or 0)
+            except ValueError:
+                count = 0
+            put("Portfolio Document Count", max(1, count))
+        if prop.folder_url:
+            put("Property Folder", prop.folder_url)
+        put("Last Updated", now)
+        if target_row:
+            self.update_row("Property Status", target_row, values)
+        else:
+            self.append("Property Status", values)
 
     def has_hash(self, sha256: str) -> tuple[bool, str]:
         rows = self.values("Document Register")
