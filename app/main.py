@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from openpyxl import load_workbook
-from app.refi_processor import process_refi_message
+from app.morgan import handle_morgan_message
 from app.active_deals_sheets import update_active_deals_from_email, ensure_active_deals_tabs_only
 from html import unescape
 
@@ -33,38 +33,30 @@ DEAL_DIR = "/home/brubot77/.openclaw/workspace/shannon/Input"
 DEAL_OUTPUT_DIR = "/home/brubot77/.openclaw/workspace/shannon/Output"
 MONTHLY_OUTPUT_DIR = Path("/home/brubot77/Monthly-Analyzer/output")
 
-def handle_refi_request(
+def handle_morgan_request(
     message: dict,
     gmail: GmailClient,
+    token_path: str,
     processed_label_id: str,
     failed_label_id: str,
 ) -> bool:
-    subject = get_subject(message).strip().lower()
+    handled, success, detail = handle_morgan_message(
+        message=message,
+        gmail=gmail,
+        token_path=token_path,
+    )
 
-    if subject != "refi":
+    if not handled:
         return False
 
     message_id = message["id"]
-    sender = get_sender(message)
-
-    success, detail = process_refi_message(
-        message=message,
-        gmail=gmail,
-        sender=sender,
-    )
-
     if not success:
-        print(f"{message_id}: Refi failed -> {detail}")
+        print(f"{message_id}: Morgan failed -> {detail}")
         gmail.mark_failed(message_id, failed_label_id)
         return True
 
-    print(f"{message_id}: Refi processed -> {detail}")
-
-    gmail.mark_processed_and_archive(
-        message_id,
-        processed_label_id,
-    )
-
+    print(f"{message_id}: Morgan processed -> {detail}")
+    gmail.mark_processed_and_archive(message_id, processed_label_id)
     return True
 
 def trigger_deal_analyzer():
@@ -850,14 +842,15 @@ def main():
 
         message = gmail.get_message(message_id)
 
-        handled_refi = handle_refi_request(
+        handled_morgan = handle_morgan_request(
             message,
             gmail,
+            settings.gmail_token_path,
             processed_label_id,
             failed_label_id,
         )
 
-        if handled_refi:
+        if handled_morgan:
             processed_ids.add(message_id)
             state.save(processed_ids)
             continue
