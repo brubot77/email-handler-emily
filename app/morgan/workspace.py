@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import random
+import time
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.errors import HttpError
 
 from .addressing import canonical_property_key, normalized_display, safe_filename
 from .models import PropertyRecord, DocumentAnalysis
@@ -39,12 +42,26 @@ class MorganWorkspace:
         self.sheet_id = sheet_id
         self.root_folder_id = root_folder_id
 
+    @staticmethod
+    def _execute_write(request, attempts: int = 7):
+        """Execute a Google write request with exponential backoff for quota/transient errors."""
+        for attempt in range(attempts):
+            try:
+                return request.execute()
+            except HttpError as exc:
+                status = getattr(exc.resp, "status", None)
+                if status not in (429, 500, 502, 503, 504) or attempt == attempts - 1:
+                    raise
+                delay = min(60.0, (2 ** attempt) + random.random())
+                print(f"Morgan Google API write throttled ({status}); retrying in {delay:.1f}s")
+                time.sleep(delay)
+
     def ensure_schema(self) -> None:
         meta = self.sheets.spreadsheets().get(spreadsheetId=self.sheet_id).execute()
         existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
         requests = [{"addSheet": {"properties": {"title": name}}} for name in SHEETS if name not in existing]
         if requests:
-            self.sheets.spreadsheets().batchUpdate(spreadsheetId=self.sheet_id, body={"requests": requests}).execute()
+            self._execute_write(self.sheets.spreadsheets().batchUpdate(spreadsheetId=self.sheet_id, body={"requests": requests}))
         for name, headers in SHEETS.items():
             result = self.sheets.spreadsheets().values().get(spreadsheetId=self.sheet_id, range=f"'{name}'!1:1").execute()
             if not result.get("values"):
@@ -66,20 +83,54 @@ class MorganWorkspace:
         headers = rows[0]
         idx = {name: i for i, name in enumerate(headers)}
         result: dict[str, PropertyRecord] = {}
+        pending_updates: list[dict[str, Any]] = []
+
         for row_no, row in enumerate(rows[1:], start=2):
             def get(name: str) -> str:
                 i = idx.get(name, -1)
                 return str(row[i]).strip() if i >= 0 and i < len(row) else ""
+
             address, llc = get("Property Address"), get("LLC")
             if not address or not llc:
                 continue
-            key = get("Canonical Property Key") or canonical_property_key(address)
-            record = PropertyRecord(address=normalized_display(address), llc=llc.upper(), canonical_key=key, city=get("City"), state=get("State") or "KS", zip_code=get("ZIP"), active=get("Active Property") or "Yes", folder_id=get("Property Folder ID"), folder_url=get("Property Folder"))
+
+            existing_key = get("Canonical Property Key")
+            key = existing_key or canonical_property_key(address)
+            record = PropertyRecord(
+                address=normalized_display(address),
+                llc=llc.upper(),
+                canonical_key=key,
+                city=get("City"),
+                state=get("State") or "KS",
+                zip_code=get("ZIP"),
+                active=get("Active Property") or "Yes",
+                folder_id=get("Property Folder ID"),
+                folder_url=get("Property Folder"),
+            )
             result[key] = record
-            if not get("Canonical Property Key"):
-                padded = row + [""] * (len(headers) - len(row))
-                padded[idx["Canonical Property Key"]] = key
-                self.update_row("Property Master", row_no, padded[:len(headers)])
+
+            if not existing_key and "Canonical Property Key" in idx:
+                column_number = idx["Canonical Property Key"] + 1
+                letters = ""
+                n = column_number
+                while n:
+                    n, remainder = divmod(n - 1, 26)
+                    letters = chr(65 + remainder) + letters
+                pending_updates.append({
+                    "range": f"'Property Master'!{letters}{row_no}",
+                    "values": [[key]],
+                })
+
+        if pending_updates:
+            request = self.sheets.spreadsheets().values().batchUpdate(
+                spreadsheetId=self.sheet_id,
+                body={
+                    "valueInputOption": "RAW",
+                    "data": pending_updates,
+                },
+            )
+            self._execute_write(request)
+
         return result
 
     def find_or_create_folder(self, name: str, parent_id: str) -> str:
