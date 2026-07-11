@@ -8,7 +8,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 from app.config import load_settings
-from app.morgan.workspace import MorganWorkspace
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 DEFAULT_BLU_REVIEW_DOCS_FOLDER_ID = "1kbUI4CrAXDMeE4mjj8pMJ_GrM488QEIa"
@@ -28,20 +27,24 @@ def find_or_create_folder(drive: Any, name: str, parent_id: str) -> str:
     )
     if files:
         return files[0]["id"]
-    return (
+
+    result = (
         drive.files()
         .create(
             body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
             fields="id",
         )
-        .execute()["id"]
+        .execute()
     )
+    return result["id"]
 
 
 def move_file(drive: Any, file_id: str, destination_parent_id: str) -> None:
-    metadata = drive.files().get(fileId=file_id, fields="parents").execute()
+    metadata = drive.files().get(fileId=file_id, fields="id,name,parents").execute()
     current_parents = metadata.get("parents", [])
+
     if destination_parent_id in current_parents and len(current_parents) == 1:
+        print(f"Already organized: {metadata.get('name', file_id)}")
         return
 
     remove_parents = ",".join(
@@ -50,11 +53,13 @@ def move_file(drive: Any, file_id: str, destination_parent_id: str) -> None:
     kwargs = {
         "fileId": file_id,
         "addParents": destination_parent_id,
-        "fields": "id,parents",
+        "fields": "id,name,parents,webViewLink",
     }
     if remove_parents:
         kwargs["removeParents"] = remove_parents
-    drive.files().update(**kwargs).execute()
+
+    updated = drive.files().update(**kwargs).execute()
+    print(f"Moved: {updated.get('name', file_id)}")
 
 
 def main() -> None:
@@ -64,62 +69,41 @@ def main() -> None:
         credentials.refresh(Request())
 
     drive = build("drive", "v3", credentials=credentials)
-    sheets = build("sheets", "v4", credentials=credentials)
 
     blu_review_docs_id = os.getenv(
         "BLU_REVIEW_DOCS_FOLDER_ID", DEFAULT_BLU_REVIEW_DOCS_FOLDER_ID
     ).strip()
+    tracker_id = os.getenv("MORGAN_TRACKER_SHEET_ID", "").strip()
+    morgan_root_id = os.getenv("MORGAN_DRIVE_ROOT_FOLDER_ID", "").strip()
+
+    if not tracker_id:
+        raise RuntimeError("MORGAN_TRACKER_SHEET_ID is missing from .env")
+    if not morgan_root_id:
+        raise RuntimeError("MORGAN_DRIVE_ROOT_FOLDER_ID is missing from .env")
+
     automation_id = find_or_create_folder(drive, "BLU Automation", blu_review_docs_id)
     morgan_parent_id = find_or_create_folder(drive, "Morgan", automation_id)
 
-    root_id = os.getenv("MORGAN_DRIVE_ROOT_FOLDER_ID", "").strip()
-    if not root_id:
-        root = (
-            drive.files()
-            .create(
-                body={
-                    "name": "Property Documents - Morgan",
-                    "mimeType": FOLDER_MIME,
-                    "parents": [morgan_parent_id],
-                },
-                fields="id,webViewLink",
-            )
-            .execute()
-        )
-        root_id = root["id"]
-    else:
-        move_file(drive, root_id, morgan_parent_id)
+    move_file(drive, tracker_id, morgan_parent_id)
+    move_file(drive, morgan_root_id, morgan_parent_id)
 
-    sheet_id = os.getenv("MORGAN_TRACKER_SHEET_ID", "").strip()
-    if not sheet_id:
-        sheet = (
-            sheets.spreadsheets()
-            .create(
-                body={
-                    "properties": {
-                        "title": "Property Closing and Refinance Document Tracker"
-                    }
-                },
-                fields="spreadsheetId,spreadsheetUrl",
-            )
-            .execute()
-        )
-        sheet_id = sheet["spreadsheetId"]
-    move_file(drive, sheet_id, morgan_parent_id)
-
-    workspace = MorganWorkspace(settings.gmail_token_path, sheet_id, root_id)
-    workspace.ensure_schema()
-
-    print("Add or confirm these lines in .env:")
-    print(f"BLU_REVIEW_DOCS_FOLDER_ID={blu_review_docs_id}")
-    print(f"MORGAN_TRACKER_SHEET_ID={sheet_id}")
-    print(f"MORGAN_DRIVE_ROOT_FOLDER_ID={root_id}")
+    print()
+    print("Morgan organization complete.")
     print(
         "Morgan folder: "
         f"https://drive.google.com/drive/folders/{morgan_parent_id}"
     )
-    print(f"Tracker: https://docs.google.com/spreadsheets/d/{sheet_id}")
-    print(f"Drive folder: https://drive.google.com/drive/folders/{root_id}")
+    print(
+        "Tracker: "
+        f"https://docs.google.com/spreadsheets/d/{tracker_id}"
+    )
+    print(
+        "Document root: "
+        f"https://drive.google.com/drive/folders/{morgan_root_id}"
+    )
+    print()
+    print("Optional .env line:")
+    print(f"BLU_REVIEW_DOCS_FOLDER_ID={blu_review_docs_id}")
 
 
 if __name__ == "__main__":
