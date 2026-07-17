@@ -581,8 +581,21 @@ def _newest_shannon_output_after(before_snapshot: dict[str, float]) -> Path:
     raise FileNotFoundError("Shannon ran but no new output workbook was detected")
 
 
-def _run_shannon_for_property(address: str) -> Path:
-    street, city, state = _split_address_city_state(address)
+def _run_shannon_for_property(
+    address: str,
+    city: str = "",
+    state: str = "KS",
+) -> Path:
+    parsed_street, parsed_city, parsed_state = _split_address_city_state(address)
+
+    street = parsed_street
+    city = str(city or "").strip() or parsed_city
+    state = str(state or "").strip() or parsed_state or "KS"
+
+    print(
+        "Active Deals -> Shannon input: "
+        f"address={street!r}, city={city!r}, state={state!r}"
+    )
 
     SHANNON_INPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1468,12 +1481,14 @@ def _create_shannon_property_tab(
     headers: dict[str, int],
     row_idx: int,
     address: str,
+    city: str = "",
+    state: str = "KS",
 ) -> int:
     sheet_title = _unique_sheet_title(meta, address)
 
     print(f"Creating native Google Sheets Shannon tab for {address}")
 
-    shannon_output_path = _run_shannon_for_property(address)
+    shannon_output_path = _run_shannon_for_property(address, city=city, state=state)
     shannon_values = _shannon_workbook_to_values(shannon_output_path)
 
     property_sheet_id = _add_sheet(
@@ -1612,6 +1627,8 @@ def _update_one_active_deal_block(body_text: str) -> ActiveDealsResult:
             headers=headers,
             row_idx=row_idx,
             address=address,
+            city=city,
+            state=state,
         )
 
     return ActiveDealsResult(
@@ -1643,6 +1660,8 @@ def ensure_active_deals_tabs_only() -> int:
     sheets, spreadsheet_id, _file_name, meta, active_sheet_name, active_sheet_id, values, header_row, headers = _load_active_deals_state()
 
     address_col = _find_col(headers, ["Address", "Property Address", "Property", "Street Address"])
+    city_col = _find_col(headers, ["City"])
+    state_col = _find_col(headers, ["St", "State"])
 
     if address_col is None:
         raise ValueError("Active Deals tab does not have an Address column")
@@ -1653,6 +1672,12 @@ def ensure_active_deals_tabs_only() -> int:
         row = values[row_idx - 1]
         address = row[address_col - 1] if len(row) >= address_col else ""
         address = str(address or "").strip()
+
+        city = row[city_col - 1] if city_col is not None and len(row) >= city_col else ""
+        city = str(city or "").strip()
+
+        state = row[state_col - 1] if state_col is not None and len(row) >= state_col else "KS"
+        state = str(state or "").strip() or "KS"
 
         if not address:
             continue
@@ -1671,6 +1696,8 @@ def ensure_active_deals_tabs_only() -> int:
             headers=headers,
             row_idx=row_idx,
             address=address,
+            city=city,
+            state=state,
         )
 
         created_count += 1
