@@ -601,6 +601,11 @@ def _run_shannon_for_property(
     safe_name = re.sub(r"[^A-Za-z0-9]+", "_", street).strip("_") or "property"
     csv_path = SHANNON_INPUT_DIR / f"active_deals_{safe_name}_{stamp}.csv"
 
+    # Shannon may determine county/jurisdiction from the Address field itself.
+    # Include the authoritative Active Deals city/state in Address as well as
+    # in their dedicated columns so a street-only address cannot default to Wichita.
+    full_address = ", ".join(part for part in (street, city, state) if part)
+
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(
             f,
@@ -609,11 +614,16 @@ def _run_shannon_for_property(
         writer.writeheader()
         writer.writerow(
             {
-                "Address": street,
+                "Address": full_address,
                 "City": city,
                 "State": state,
             }
         )
+
+    print(
+        f"Active Deals CSV written: path={csv_path}, "
+        f"Address={full_address!r}, City={city!r}, State={state!r}"
+    )
 
     before_snapshot = _snapshot_shannon_outputs()
 
