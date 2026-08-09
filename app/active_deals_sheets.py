@@ -16,6 +16,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from openpyxl import load_workbook
 
+from app.location_utils import split_street_city_state_zip, street_only
+
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
@@ -71,10 +73,9 @@ def _a1(sheet_name: str, row_idx: int, col_idx: int) -> str:
 def normalize_address_match_key(address: str) -> str:
     text = str(address or "").strip().lower()
 
-    if "," in text:
-        text = text.split(",", 1)[0]
+    text = street_only(text).lower()
 
-    text = re.sub(r"\bwichita\b|\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", text)
     text = re.sub(r"[^a-z0-9\s]", " ", text)
 
@@ -444,25 +445,7 @@ def _field_aliases_for_header(header_key: str) -> list[str]:
 
 
 def _split_city_state_zip(address: str) -> tuple[str, str, str]:
-    parts = [p.strip() for p in str(address or "").split(",")]
-
-    city = ""
-    state = ""
-    zip_code = ""
-
-    if len(parts) >= 2:
-        city = parts[1].strip()
-
-    if len(parts) >= 3:
-        state_zip = parts[2].strip()
-        tokens = state_zip.split()
-
-        if tokens:
-            state = tokens[0].strip()
-
-        if len(tokens) > 1:
-            zip_code = tokens[1].strip()
-
+    _street, city, state, zip_code = split_street_city_state_zip(address)
     return city, state, zip_code
 
 
@@ -541,18 +524,8 @@ def _sheet_exists_for_address(meta: dict, address: str) -> bool:
 
 
 def _split_address_city_state(address: str) -> tuple[str, str, str]:
-    parts = [p.strip() for p in str(address or "").split(",")]
-
-    street = parts[0] if parts else str(address or "").strip()
-    city = parts[1] if len(parts) >= 2 else "Wichita"
-    state = "KS"
-
-    if len(parts) >= 3:
-        state_part = parts[2].strip().split()
-        if state_part:
-            state = state_part[0]
-
-    return street, city, state
+    street, city, state, _zip_code = split_street_city_state_zip(address)
+    return street, city, state or "KS"
 
 
 def _snapshot_shannon_outputs() -> dict[str, float]:

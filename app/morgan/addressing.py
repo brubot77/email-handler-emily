@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from app.location_utils import street_only as _market_street_only
+
 SUFFIXES = {
     "street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln",
     "court", "ct", "boulevard", "blvd", "place", "pl", "terrace", "ter", "circle", "cir",
@@ -11,7 +13,7 @@ DIRECTIONS = {"n", "s", "e", "w", "north", "south", "east", "west", "ne", "nw", 
 
 
 def street_only(address: str) -> str:
-    return (address or "").split(",", 1)[0].strip()
+    return _market_street_only(address)
 
 
 def canonical_property_key(address: str) -> str:

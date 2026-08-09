@@ -5,6 +5,8 @@ import re
 import tempfile
 from pathlib import Path
 
+from app.location_utils import SUPPORTED_CITY_RE, split_street_city_state_zip
+
 
 CSV_HEADERS = ["Address", "City", "State", "zip", "Baths", "Beds", "Price"]
 
@@ -190,10 +192,7 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
 
-    city_re = re.compile(
-        r"\b(Wichita|Andover|Bel Aire|Bentley|Clearwater|Colwich|Derby|Eastborough|Garden Plain|Goddard|Haysville|Kechi|Maize|Mount Hope|Mulvane|Park City|Valley Center|Viola|Newton|Hesston|Halstead|Burrton|North Newton|Sedgwick|Walton)\b",
-        re.IGNORECASE,
-    )
+    city_re = SUPPORTED_CITY_RE
 
     zip_re = re.compile(r"\b(67\d{3})\b")
 
@@ -213,19 +212,28 @@ def _parse_short_address_lines(body_text: str) -> list[dict[str, str]]:
         if address.lower().startswith("address"):
             continue
 
-        key = address.lower()
-        if key in seen:
-            continue
-
-        seen.add(key)
-
         city = _clean(match.group("city")) if match.group("city") else ""
         zip_code = _clean(match.group("zip")) if match.group("zip") else ""
 
         if not city:
             city_match = city_re.search(line)
             city = _clean(city_match.group(1)) if city_match else ""
-        
+
+        # LINE_ADDRESS_RE intentionally accepts compact email lines, so on a
+        # no-comma address it may temporarily absorb city/state into Address.
+        # Split it back out using the shared market-aware parser.
+        parsed_street, parsed_city, _parsed_state, parsed_zip = split_street_city_state_zip(line)
+        if parsed_street:
+            address = _clean_address(parsed_street)
+        city = city or parsed_city
+        zip_code = zip_code or parsed_zip
+
+        key = address.lower()
+        if key in seen:
+            continue
+
+        seen.add(key)
+
         rows.append(
             {
                 "Address": address,
