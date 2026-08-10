@@ -10,6 +10,8 @@ import subprocess
 import time
 from pathlib import Path
 from openpyxl import load_workbook
+
+from app.location_utils import street_only
 from app.morgan import handle_morgan_message
 from app.active_deals_sheets import update_active_deals_from_email, ensure_active_deals_tabs_only
 from html import unescape
@@ -107,17 +109,14 @@ def normalize_address_for_filename(address: str) -> str:
 
     text = str(address or "").strip()
 
-    # Keep only street part before city/state.
-    if "," in text:
-        text = text.split(",", 1)[0].strip()
-
+    # Keep only the street portion, without assuming the city is Wichita.
+    text = street_only(text)
     text = text.replace("\u00a0", " ")
 
     # Remove punctuation.
     text = re.sub(r"[^A-Za-z0-9\s]", " ", text)
 
-    # Remove city/state/zip noise if accidentally included.
-    text = re.sub(r"\bwichita\b", " ", text, flags=re.IGNORECASE)
+    # Remove state/ZIP noise if accidentally included.
     text = re.sub(r"\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", text)
 
@@ -272,9 +271,8 @@ def canonical_property_key(
 
     text = str(address or "").strip().lower()
 
-    # If city/state are included after commas, keep only street portion.
-    if "," in text:
-        text = text.split(",", 1)[0]
+    # Keep only the street portion for any supported market/county.
+    text = street_only(text).lower()
 
     # Cut off accidentally swallowed labeled fields.
     text = re.split(
@@ -283,8 +281,7 @@ def canonical_property_key(
         flags=re.IGNORECASE,
     )[0]
 
-    # Remove city/state/ZIP noise if typed without commas.
-    text = re.sub(r"\bwichita\b", " ", text, flags=re.IGNORECASE)
+    # Remove state/ZIP noise if typed without commas.
     text = re.sub(r"\bks\b|\bkansas\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", text)
 
