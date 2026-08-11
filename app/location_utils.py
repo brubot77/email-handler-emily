@@ -8,7 +8,6 @@ import re
 SUPPORTED_KS_CITIES = {
     # Sedgwick / Wichita-area markets already supported by Emily/Shannon.
     "Wichita",
-    "Andover",
     "Bel Aire",
     "Bentley",
     "Clearwater",
@@ -25,6 +24,20 @@ SUPPORTED_KS_CITIES = {
     "Park City",
     "Valley Center",
     "Viola",
+    # Butler County.
+    "Andover",
+    "Augusta",
+    "Benton",
+    "Cassoday",
+    "Douglass",
+    "Elbing",
+    "El Dorado",
+    "Latham",
+    "Leon",
+    "Potwin",
+    "Rose Hill",
+    "Towanda",
+    "Whitewater",
     # Harvey County markets already supported by Emily/Shannon.
     "Newton",
     "Hesston",
