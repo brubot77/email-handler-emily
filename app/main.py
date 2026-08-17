@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 
 from app.location_utils import street_only
 from app.morgan import handle_morgan_message
+from app.appraisal_agent.email_handler import handle_appraisal_request
 from app.active_deals_sheets import update_active_deals_from_email, ensure_active_deals_tabs_only
 from html import unescape
 
@@ -851,6 +852,19 @@ def main():
             processed_ids.add(message_id)
             state.save(processed_ids)
             continue
+
+        handled_appraisal = handle_appraisal_request(
+            message,
+            gmail,
+            processed_label_id,
+            failed_label_id,
+        )
+
+        if handled_appraisal:
+            processed_ids.add(message_id)
+            state.save(processed_ids)
+            continue
+
 
         handled_address_data = handle_address_data_request(
             message,

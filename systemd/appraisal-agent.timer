@@ -1,0 +1,10 @@
+[Unit]
+Description=Run BLU Appraisal Agent daily
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 America/Chicago
+Persistent=true
+Unit=appraisal-agent.service
+
+[Install]
+WantedBy=timers.target

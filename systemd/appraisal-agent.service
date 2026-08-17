@@ -1,0 +1,15 @@
+[Unit]
+Description=BLU Appraisal Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=brubot77
+WorkingDirectory=/home/brubot77/email-handler-emily
+EnvironmentFile=-/home/brubot77/email-handler-emily/.env
+ExecStart=/home/brubot77/email-handler-emily/venv/bin/python -m app.appraisal_agent_runner
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
