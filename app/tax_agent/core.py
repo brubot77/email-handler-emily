@@ -10,7 +10,10 @@ from .normalize import record_key
 def merge_records(records: Iterable[TaxRecord]) -> list[TaxRecord]:
     merged: dict[str, TaxRecord] = {}
     for record in records:
-        key = record_key(record.county, record.parcel_id, record.tax_id, record.address, record.city)
+        key = record_key(
+            record.county, record.parcel_id, record.tax_id,
+            record.address, record.city, record.case_id,
+        )
         if key not in merged:
             merged[key] = record
             continue
@@ -38,6 +41,7 @@ def merge_records(records: Iterable[TaxRecord]) -> list[TaxRecord]:
             source_url=" | ".join(dict.fromkeys(source_urls)),
             source_type=record.source_type or old.source_type,
             notes=notes,
+            case_id=record.case_id or old.case_id,
             ain=record.ain or old.ain,
             land_value=record.land_value if record.land_value is not None else old.land_value,
             improvement_value=record.improvement_value if record.improvement_value is not None else old.improvement_value,

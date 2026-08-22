@@ -116,52 +116,128 @@ def parse_foreclosure_exhibit(text: str, *, county: str, source_url: str = "") -
     return records
 
 
-def parse_harvey_foreclosure_notice(text: str, *, source_url: str = "") -> list[TaxRecord]:
-    """Parse Harvey County sheriff-sale notices.
+def _harvey_foreclosure_year_from_court_case(court_case: str) -> int | None:
+    match = re.search(r"(?i)(\d{2})-CV-", court_case or "")
+    if not match:
+        return None
+    return 2000 + int(match.group(1))
 
-    Harvey notices identify causes, parcel numbers, owners and a tax-through year,
-    but often say "YEAR and prior years" rather than enumerating every delinquent
-    year. For scoring we conservatively represent a three-year minimum window and
-    explicitly flag that inference for later parcel-history verification.
-    """
+
+def parse_harvey_foreclosure_notice(text: str, *, source_url: str = "") -> list[TaxRecord]:
     clean = re.sub(r"\r", "\n", text or "")
-    starts = list(re.finditer(r"(?im)\bCAUSE\s+(\d+)\s*\(\s*Parcel\s*#\s*([^) ;]+)", clean))
+    court_match = re.search(
+        r"(?im)\bNo\.\s*([A-Z]{0,3}-?\d{2}-CV-\d+)",
+        clean,
+    )
+    court_case = court_match.group(1).strip() if court_match else ""
+    foreclosure_year = _harvey_foreclosure_year_from_court_case(court_case)
+
+    starts = list(
+        re.finditer(
+            r"(?im)\bCAUSE\s+(\d+)\s*\(\s*Parcel\s*#\s*([^) ;]+)",
+            clean,
+        )
+    )
     rows: list[TaxRecord] = []
+
     for idx, match in enumerate(starts):
         end = starts[idx + 1].start() if idx + 1 < len(starts) else len(clean)
         block = clean[match.start():end]
         cause, parcel = match.group(1), match.group(2).strip()
-        owner_match = re.search(r"(?im)Owners?\s+of\s+Record\s*:\s*([^\n]+)", block)
+
+        owner_match = re.search(
+            r"(?im)Owners?\s+of\s+Record\s*:\s*([^\n]+)",
+            block,
+        )
         tax_match = re.search(
-            r"(?is)Taxes\s+for\s+the\s+year\s+(20\d{2})\s+and\s+prior\s+years.*?[-–]\s*\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)",
+            r"(?is)Taxes\s+for\s+the\s+year\s+(20\d{2})\s+and\s+prior\s+years"
+            r".*?[-–]\s*\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)",
             block,
         )
         if not tax_match:
             continue
+
         through_year = int(tax_match.group(1))
         years = (through_year - 2, through_year - 1, through_year)
-        rows.append(TaxRecord(
-            county="Harvey", parcel_id=parcel, tax_id=f"CAUSE-{cause}",
-            owner=owner_match.group(1).strip() if owner_match else "",
-            delinquent_years=years, amount_due=float(tax_match.group(2).replace(",", "")),
-            source_url=source_url, source_type="foreclosure_notice",
-            notes=f"Inferred minimum 3-year delinquency ending {through_year} from filed foreclosure notice; exact tax years require parcel verification.",
-        ))
+        case_id = (
+            f"{foreclosure_year}|CAUSE-{cause}"
+            if foreclosure_year is not None
+            else f"CAUSE-{cause}"
+        )
+
+        notes = (
+            f"Inferred minimum 3-year delinquency ending {through_year} from filed "
+            "foreclosure notice; exact tax years require parcel verification."
+        )
+        if court_case:
+            notes = f"Court case {court_case}. " + notes
+
+        rows.append(
+            TaxRecord(
+                county="Harvey",
+                parcel_id=parcel,
+                tax_id=parcel,
+                case_id=case_id,
+                owner=owner_match.group(1).strip() if owner_match else "",
+                delinquent_years=years,
+                amount_due=float(tax_match.group(2).replace(",", "")),
+                source_url=source_url,
+                source_type="foreclosure_notice",
+                notes=notes,
+            )
+        )
+
     return rows
 
 
 def parse_harvey_news_status(text: str, *, source_url: str = "") -> list[TaxRecord]:
-    """Extract cause-level redemption updates from Harvey County foreclosure news."""
     rows: list[TaxRecord] = []
-    # Example: "causes 11, 13 and 25 ... have been redeemed"
-    for match in re.finditer(r"(?is)causes?\s+([0-9,\sand]+).*?\b(?:have|has)\s+been\s+redeemed", text or ""):
-        nums = re.findall(r"\d+", match.group(1))
-        for cause in nums:
-            rows.append(TaxRecord(
-                county="Harvey", tax_id=f"CAUSE-{cause}", status="REDEEMED",
-                source_url=source_url, source_type="foreclosure_status",
-                notes="Harvey County news update marks this foreclosure cause redeemed.",
-            ))
+    source = text or ""
+
+    preferred = re.compile(
+        r"(?is)causes?\s+([0-9,\sand]+?)\s+from\s+the\s+(20\d{2})\s+"
+        r"tax\s+foreclosure.*?\b(?:have|has)\s+been\s+redeemed"
+    )
+    matched_spans: list[tuple[int, int]] = []
+
+    for match in preferred.finditer(source):
+        matched_spans.append(match.span())
+        year = match.group(2)
+        for cause in re.findall(r"\d+", match.group(1)):
+            rows.append(
+                TaxRecord(
+                    county="Harvey",
+                    case_id=f"{year}|CAUSE-{cause}",
+                    status="REDEEMED",
+                    source_url=source_url,
+                    source_type="foreclosure_status",
+                    notes=(
+                        f"Harvey County news update marks Cause {cause} from the "
+                        f"{year} tax foreclosure redeemed."
+                    ),
+                )
+            )
+
+    remaining = source
+    for start, end in reversed(matched_spans):
+        remaining = remaining[:start] + " " * (end - start) + remaining[end:]
+
+    for match in re.finditer(
+        r"(?is)causes?\s+([0-9,\sand]+).*?\b(?:have|has)\s+been\s+redeemed",
+        remaining,
+    ):
+        for cause in re.findall(r"\d+", match.group(1)):
+            rows.append(
+                TaxRecord(
+                    county="Harvey",
+                    case_id=f"CAUSE-{cause}",
+                    status="REDEEMED",
+                    source_url=source_url,
+                    source_type="foreclosure_status",
+                    notes="Harvey County news update marks this foreclosure cause redeemed.",
+                )
+            )
+
     return rows
 
 

@@ -58,7 +58,9 @@ def candidate_row(candidate: TaxCandidate, rank: int) -> dict[str, str]:
     if r.amount_due is not None and r.appraised_value:
         ratio = f"{r.amount_due / r.appraised_value:.2%}"
     return {
-        "Record Key": record_key(r.county, r.parcel_id, r.tax_id, r.address, r.city),
+        "Record Key": record_key(
+            r.county, r.parcel_id, r.tax_id, r.address, r.city, r.case_id
+        ),
         "Rank": str(rank),
         "Score": str(candidate.score),
         "County": r.county,

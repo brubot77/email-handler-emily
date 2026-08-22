@@ -86,7 +86,7 @@ def residential_status(record: TaxRecord) -> bool | None:
         return True
     if text.startswith("R |") or text == "R":
         return True
-    if any(token in text for token in ("COMMERCIAL", "INDUSTRIAL", "AGRICULTURAL")):
+    if any(token in text for token in ("COMMERCIAL", "INDUSTRIAL", "AGRICULTURAL", "EXEMPT")):
         return False
     if text.startswith(("C |", "I |", "A |")) or text in {"C", "I", "A"}:
         return False

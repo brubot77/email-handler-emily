@@ -27,6 +27,10 @@ class TaxRecord:
     source_type: str = ""
     notes: str = ""
 
+    # Stable foreclosure identity for counties where cause numbers repeat
+    # across different annual court actions (notably Harvey County).
+    case_id: str = ""
+
     # Official parcel/appraisal enrichment fields.
     ain: str = ""
     land_value: float | None = None

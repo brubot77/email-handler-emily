@@ -32,11 +32,24 @@ def normalize_address(value: str) -> str:
     return " ".join(tokens)
 
 
-def record_key(county: str, parcel_id: str, tax_id: str, address: str, city: str = "") -> str:
+def record_key(
+    county: str,
+    parcel_id: str,
+    tax_id: str,
+    address: str,
+    city: str = "",
+    case_id: str = "",
+) -> str:
     county_key = normalize_space(county).upper()
     clean_tax_id = re.sub(r"[^A-Z0-9]", "", (tax_id or "").upper())
 
-    # Harvey redemption updates use the foreclosure cause number as the stable key.
+    clean_case_id = re.sub(r"[^A-Z0-9]", "", (case_id or "").upper())
+
+    # Harvey cause numbers repeat across foreclosure actions.
+    if county_key == "HARVEY" and clean_case_id:
+        return f"{county_key}|CASE|{clean_case_id}"
+
+    # Backward compatibility for older generic Harvey cause records.
     if clean_tax_id.startswith("CAUSE"):
         return f"{county_key}|TAXID|{clean_tax_id}"
 

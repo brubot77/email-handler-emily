@@ -96,12 +96,13 @@ class ParserTests(unittest.TestCase):
         rows = parse_harvey_foreclosure_notice(HARVEY_NOTICE)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0].parcel_id, "08943")
-        self.assertEqual(rows[0].tax_id, "CAUSE-9")
+        self.assertEqual(rows[0].tax_id, "08943")
+        self.assertEqual(rows[0].case_id, "CAUSE-9")
         self.assertEqual(rows[0].amount_due, 3067.53)
         self.assertEqual(rows[0].delinquent_years, (2022, 2023, 2024))
         status = parse_harvey_news_status("Since publication, causes 11 have been redeemed.")
         merged = merge_records(rows + status)
-        cause11 = next(r for r in merged if r.tax_id == "CAUSE-11")
+        cause11 = next(r for r in merged if r.case_id == "CAUSE-11")
         self.assertTrue(cause11.is_resolved)
 
 class SourceTests(unittest.TestCase):
@@ -543,5 +544,178 @@ class Phase61DriveFolderTests(unittest.TestCase):
         add, remove = _parent_move_args(["BLU_FOLDER"], "BLU_FOLDER")
         self.assertEqual(add, "BLU_FOLDER")
         self.assertIsNone(remove)
+
+
+class Phase7AHarveyTests(unittest.TestCase):
+    def test_harvey_notice_builds_foreclosure_year_cause_key(self):
+        sample = """
+IN THE DISTRICT COURT OF HARVEY COUNTY, KANSAS
+No. 25-CV-59
+SHERIFF'S NOTICE OF SALE
+CAUSE 13 (Parcel # 0522)
+Owners of Record: Nathan A. Hedrick
+Taxes for the year 2024 and prior years with interest to January 13, 2025 - $1,748.49
+"""
+        row = parse_harvey_foreclosure_notice(sample)[0]
+        self.assertEqual(row.case_id, "2025|CAUSE-13")
+        self.assertEqual(row.parcel_id, "0522")
+        self.assertEqual(row.tax_id, "0522")
+        self.assertIn("Court case 25-CV-59", row.notes)
+
+    def test_two_harvey_cause_13_records_do_not_collide(self):
+        newer = """
+No. 25-CV-59
+SHERIFF'S NOTICE OF SALE
+CAUSE 13 (Parcel # 0522)
+Owners of Record: Nathan A. Hedrick
+Taxes for the year 2024 and prior years - $1,748.49
+"""
+        older = """
+No. HV-24-CV-30
+SHERIFF'S NOTICE OF SALE
+CAUSE 13 (Parcel # 07314)
+Owner of Record: Charles Edward McKinney, Jr
+Taxes for the year 2025 and prior years - $11,019.13
+"""
+        rows = merge_records(
+            parse_harvey_foreclosure_notice(newer)
+            + parse_harvey_foreclosure_notice(older)
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {r.case_id for r in rows},
+            {"2025|CAUSE-13", "2024|CAUSE-13"},
+        )
+
+    def test_harvey_redemption_only_resolves_same_foreclosure_year(self):
+        newer = """
+No. 25-CV-59
+SHERIFF'S NOTICE OF SALE
+CAUSE 13 (Parcel # 0522)
+Owners of Record: Nathan A. Hedrick
+Taxes for the year 2024 and prior years - $1,748.49
+"""
+        older = """
+No. HV-24-CV-30
+SHERIFF'S NOTICE OF SALE
+CAUSE 13 (Parcel # 07314)
+Owner of Record: Charles Edward McKinney, Jr
+Taxes for the year 2025 and prior years - $11,019.13
+"""
+        status = parse_harvey_news_status(
+            "Causes 11, 13 and 25 from the 2025 tax foreclosure have been redeemed."
+        )
+        rows = merge_records(
+            parse_harvey_foreclosure_notice(newer)
+            + parse_harvey_foreclosure_notice(older)
+            + status
+        )
+        r2025 = next(r for r in rows if r.case_id == "2025|CAUSE-13")
+        r2024 = next(r for r in rows if r.case_id == "2024|CAUSE-13")
+        self.assertTrue(r2025.is_resolved)
+        self.assertFalse(r2024.is_resolved)
+
+    def test_harvey_record_key_uses_case_identity(self):
+        from app.tax_agent.normalize import record_key
+        key = record_key(
+            "Harvey", "0522", "0522", "", "", "2025|CAUSE-13"
+        )
+        self.assertEqual(key, "HARVEY|CASE|2025CAUSE13")
+
+    def test_harvey_exact_taxid_enrichment(self):
+        from app.tax_agent.harvey import enrich_harvey_records
+        record = TaxRecord(
+            county="Harvey",
+            parcel_id="08943",
+            tax_id="08943",
+            case_id="2025|CAUSE-9",
+            delinquent_years=(2022, 2023, 2024),
+            amount_due=3067.53,
+            source_type="foreclosure_notice",
+        )
+
+        calls = []
+        def fake_query(where):
+            calls.append(where)
+            return [{
+                "TaxID": "08943",
+                "PIDNO": "0942001008006000",
+                "SitusAddre": "224 OLD MAIN ST, Newton, KS  67114",
+                "PriOwnerNa": "HARMS FAMILY TRUST",
+                "PropertyTy": "Residential",
+                "FLV": 6520,
+                "FBV": 31480,
+                "FTV": 38000,
+                "Weblink": "https://example.test",
+            }]
+
+        rows, audit = enrich_harvey_records([record], query_func=fake_query)
+        row = rows[0]
+        self.assertEqual(row.tax_id, "08943")
+        self.assertEqual(row.ain, "0942001008006000")
+        self.assertEqual(row.address, "224 OLD MAIN ST")
+        self.assertEqual(row.city, "Newton")
+        self.assertEqual(row.appraised_value, 38000)
+        self.assertEqual(row.land_value, 6520)
+        self.assertEqual(row.improvement_value, 31480)
+        self.assertEqual(row.value_source, "Harvey County GIS FTV")
+        self.assertEqual(audit["exact_taxid_matches"], 1)
+        self.assertTrue(any("TaxID IN ('08943')" in call for call in calls))
+
+    def test_harvey_ambiguous_short_id_is_not_partial_matched(self):
+        from app.tax_agent.harvey import enrich_harvey_records
+        record = TaxRecord(
+            county="Harvey",
+            parcel_id="0522",
+            tax_id="0522",
+            case_id="2025|CAUSE-13",
+            delinquent_years=(2022, 2023, 2024),
+            source_type="foreclosure_notice",
+        )
+
+        calls = []
+        def fake_query(where):
+            calls.append(where)
+            return []
+
+        rows, audit = enrich_harvey_records([record], query_func=fake_query)
+        self.assertIsNone(rows[0].appraised_value)
+        self.assertEqual(audit["no_match"], 1)
+        self.assertTrue(all("LIKE" not in call.upper() for call in calls))
+
+    def test_harvey_exempt_is_clearly_nonresidential(self):
+        from app.tax_agent.enrichment import is_clearly_nonresidential
+        record = TaxRecord(county="Harvey", property_class="Exempt")
+        self.assertTrue(is_clearly_nonresidential(record))
+
+    def test_harvey_verified_value_cap_applies(self):
+        low = TaxRecord(
+            county="Harvey",
+            parcel_id="08943",
+            tax_id="08943",
+            case_id="2025|CAUSE-9",
+            address="224 OLD MAIN ST",
+            delinquent_years=(2022, 2023, 2024),
+            appraised_value=38000,
+            property_class="Residential",
+            source_type="foreclosure_notice",
+        )
+        high = TaxRecord(
+            county="Harvey",
+            parcel_id="00124",
+            tax_id="00124",
+            case_id="2025|CAUSE-11",
+            address="320 1ST AVE",
+            delinquent_years=(2022, 2023, 2024),
+            appraised_value=144230,
+            property_class="Residential",
+            source_type="foreclosure_notice",
+        )
+        rows = build_candidates(
+            [low, high],
+            max_value=130000,
+            include_unknown_value=False,
+        )
+        self.assertEqual([c.record.tax_id for c in rows], ["08943"])
 
 if __name__=="__main__": unittest.main()
