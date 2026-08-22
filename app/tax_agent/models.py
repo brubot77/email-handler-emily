@@ -27,6 +27,18 @@ class TaxRecord:
     source_type: str = ""
     notes: str = ""
 
+    # Official parcel/appraisal enrichment fields.
+    ain: str = ""
+    land_value: float | None = None
+    improvement_value: float | None = None
+    year_built: int | None = None
+    sfla: int | None = None
+    living_units: int | None = None
+    bedrooms: int | None = None
+    full_baths: int | None = None
+    half_baths: int | None = None
+    value_source: str = ""
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "delinquent_years", _clean_years(self.delinquent_years))
         object.__setattr__(self, "status", (self.status or "ACTIVE").strip().upper())

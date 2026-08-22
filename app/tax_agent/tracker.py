@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict
 from pathlib import Path
 from typing import Iterable
 
@@ -19,12 +18,23 @@ HEADERS = [
     "ZIP",
     "Parcel ID",
     "Tax ID",
+    "AIN",
     "Owner",
+    "Property Class",
     "Years Delinquent",
     "Delinquent Years",
     "Amount Due",
     "Appraised Value",
+    "Land Value",
+    "Improvement Value",
     "Tax/Value %",
+    "Year Built",
+    "SFLA",
+    "Units",
+    "Beds",
+    "Full Baths",
+    "Half Baths",
+    "Value Source",
     "Foreclosure Stage",
     "Source Type",
     "Source URL",
@@ -36,6 +46,10 @@ HEADERS = [
 ]
 
 MANUAL_COLUMNS = {"Review Status", "Assigned To", "Notes"}
+
+
+def _fmt_number(value) -> str:
+    return "" if value is None else str(value)
 
 
 def candidate_row(candidate: TaxCandidate, rank: int) -> dict[str, str]:
@@ -54,12 +68,23 @@ def candidate_row(candidate: TaxCandidate, rank: int) -> dict[str, str]:
         "ZIP": r.zip_code,
         "Parcel ID": r.parcel_id,
         "Tax ID": r.tax_id,
+        "AIN": r.ain,
         "Owner": r.owner,
+        "Property Class": r.property_class,
         "Years Delinquent": str(r.years_delinquent),
         "Delinquent Years": ",".join(str(y) for y in r.delinquent_years),
         "Amount Due": "" if r.amount_due is None else f"{r.amount_due:.2f}",
         "Appraised Value": "" if r.appraised_value is None else f"{r.appraised_value:.2f}",
+        "Land Value": "" if r.land_value is None else f"{r.land_value:.2f}",
+        "Improvement Value": "" if r.improvement_value is None else f"{r.improvement_value:.2f}",
         "Tax/Value %": ratio,
+        "Year Built": _fmt_number(r.year_built),
+        "SFLA": _fmt_number(r.sfla),
+        "Units": _fmt_number(r.living_units),
+        "Beds": _fmt_number(r.bedrooms),
+        "Full Baths": _fmt_number(r.full_baths),
+        "Half Baths": _fmt_number(r.half_baths),
+        "Value Source": r.value_source,
         "Foreclosure Stage": candidate.foreclosure_stage,
         "Source Type": r.source_type,
         "Source URL": r.source_url,

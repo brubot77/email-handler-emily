@@ -34,12 +34,19 @@ def normalize_address(value: str) -> str:
 
 def record_key(county: str, parcel_id: str, tax_id: str, address: str, city: str = "") -> str:
     county_key = normalize_space(county).upper()
-    # Harvey foreclosure notices identify records by cause number in later
-    # redemption updates, so prefer that stable cause key when present.
-    if tax_id.strip().upper().startswith("CAUSE-"):
-        return f"{county_key}|TAXID|{re.sub(r'[^A-Z0-9]', '', tax_id.upper())}"
-    if parcel_id.strip():
+    clean_tax_id = re.sub(r"[^A-Z0-9]", "", (tax_id or "").upper())
+
+    # Harvey redemption updates use the foreclosure cause number as the stable key.
+    if clean_tax_id.startswith("CAUSE"):
+        return f"{county_key}|TAXID|{clean_tax_id}"
+
+    # Sedgwick Tax ID maps directly to the official parcel PIN. Prefer it over
+    # the exhibit's display Parcel No., which is not the county parcel identifier.
+    if county_key == "SEDGWICK" and clean_tax_id:
+        return f"{county_key}|TAXID|{clean_tax_id}"
+
+    if (parcel_id or "").strip():
         return f"{county_key}|PARCEL|{re.sub(r'[^A-Z0-9]', '', parcel_id.upper())}"
-    if tax_id.strip():
-        return f"{county_key}|TAXID|{re.sub(r'[^A-Z0-9]', '', tax_id.upper())}"
+    if clean_tax_id:
+        return f"{county_key}|TAXID|{clean_tax_id}"
     return f"{county_key}|ADDR|{normalize_address(address)}|{normalize_space(city).upper()}"

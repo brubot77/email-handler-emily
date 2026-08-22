@@ -233,4 +233,178 @@ RDEEMED
         butler = next(s for s in COUNTY_SOURCES if s.county == "Butler")
         self.assertIn("experience.arcgis.com", butler.allowed_domains)
 
+
+class Phase4EnrichmentTests(unittest.TestCase):
+    def _house_attrs(self):
+        return {
+            "PIN": "00252968",
+            "AIN": "087144200230100200 ",
+            "Owner": "PAXSON LINDA GAY",
+            "Prop_Addr": "11 N TONJO CT",
+            "Prop_Unit": "",
+            "Prop_City": "",
+            "Prop_zip": "67052",
+            "Class": "R",
+            "FunctionCD": "1101",
+            "FunctionDs": "Single family residence (detached)",
+            "LandVal": 49700,
+            "ImprVal": 198120,
+            "TotVal": 247820,
+            "YRBuilt": 1969,
+            "SFLA": 1401,
+            "LivingUnit": 1,
+            "BedRooms": 2,
+            "FullBath": 2,
+            "HalfBath": 0,
+        }
+
+    def test_sedgwick_key_prefers_tax_id_pin(self):
+        from app.tax_agent.normalize import record_key
+        key = record_key("Sedgwick", "530", "00252968", "11 N TONJO CT", "Goddard")
+        self.assertEqual(key, "SEDGWICK|TAXID|00252968")
+
+    def test_pin_enrichment_populates_official_value_and_details(self):
+        from app.tax_agent.enrichment import enrich_sedgwick_records
+        record = TaxRecord(
+            county="Sedgwick",
+            parcel_id="530",
+            tax_id="00252968",
+            address="11 N TONJO CT",
+            city="Goddard",
+            delinquent_years=(2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024),
+            source_type="foreclosure_exhibit",
+        )
+        calls = []
+        def fake_query(where):
+            calls.append(where)
+            if "PIN IN" in where:
+                return [self._house_attrs()]
+            return []
+        rows, audit = enrich_sedgwick_records([record], query_func=fake_query)
+        row = rows[0]
+        self.assertEqual(row.appraised_value, 247820)
+        self.assertEqual(row.ain, "087144200230100200")
+        self.assertEqual(row.year_built, 1969)
+        self.assertEqual(row.sfla, 1401)
+        self.assertEqual(row.bedrooms, 2)
+        self.assertEqual(row.full_baths, 2)
+        self.assertEqual(row.value_source, "Sedgwick County GIS TotVal")
+        self.assertEqual(audit["pin_matches"], 1)
+        self.assertEqual(audit["value_verified"], 1)
+
+    def test_address_fallback_when_pin_has_no_match(self):
+        from app.tax_agent.enrichment import enrich_sedgwick_records
+        attrs = self._house_attrs()
+        record = TaxRecord(
+            county="Sedgwick",
+            parcel_id="530",
+            tax_id="99999999",
+            address="11 N TONJO CT",
+            city="Goddard",
+            delinquent_years=(2021, 2022, 2023, 2024),
+        )
+        def fake_query(where):
+            if "Prop_Addr IN" in where:
+                return [attrs]
+            return []
+        rows, audit = enrich_sedgwick_records([record], query_func=fake_query)
+        self.assertEqual(rows[0].tax_id, "00252968")
+        self.assertEqual(rows[0].appraised_value, 247820)
+        self.assertEqual(audit["address_matches"], 1)
+
+    def test_commercial_highest_best_use_is_nonresidential(self):
+        from app.tax_agent.enrichment import enrich_sedgwick_records, is_clearly_nonresidential
+        attrs = {
+            "PIN": "00595965",
+            "AIN": "087119320330300802 ",
+            "Owner": "J I LORD PROPERTIES LLC",
+            "Prop_Addr": "",
+            "Prop_Unit": "",
+            "Prop_City": "",
+            "Prop_zip": "",
+            "Class": "V",
+            "FunctionCD": "9950",
+            "FunctionDs": "Commercial highest and best use",
+            "LandVal": 4400,
+            "ImprVal": 0,
+            "TotVal": 4400,
+            "YRBuilt": None,
+            "SFLA": 0,
+            "LivingUnit": 0,
+            "BedRooms": 0,
+            "FullBath": 0,
+            "HalfBath": 0,
+        }
+        record = TaxRecord(county="Sedgwick", tax_id="00595965", delinquent_years=(2021, 2022, 2023, 2024))
+        rows, _ = enrich_sedgwick_records([record], query_func=lambda where: [attrs])
+        self.assertTrue(is_clearly_nonresidential(rows[0]))
+
+    def test_verified_value_over_cap_is_filtered(self):
+        from app.tax_agent.enrichment import enrich_sedgwick_records
+        record = TaxRecord(
+            county="Sedgwick",
+            tax_id="00252968",
+            address="11 N TONJO CT",
+            delinquent_years=(2021, 2022, 2023, 2024),
+            source_type="foreclosure_exhibit",
+        )
+        rows, _ = enrich_sedgwick_records([record], query_func=lambda where: [self._house_attrs()])
+        self.assertEqual(build_candidates(rows, max_value=130000, include_unknown_value=False), [])
+
+    def test_vacant_residential_parcel_is_kept_but_flagged(self):
+        from app.tax_agent.enrichment import enrich_sedgwick_records, is_clearly_nonresidential
+        attrs = {
+            "PIN": "00139705",
+            "AIN": "087122100420600200 ",
+            "Owner": "VILLASENOR JUAN MANUEL",
+            "Prop_Addr": "1656 N POPLAR AVE",
+            "Prop_Unit": "",
+            "Prop_City": "WICHITA",
+            "Prop_zip": "67214",
+            "Class": "V",
+            "FunctionCD": "9910",
+            "FunctionDs": "Residential highest and best use",
+            "LandVal": 10100,
+            "ImprVal": 0,
+            "TotVal": 10100,
+            "YRBuilt": None,
+            "SFLA": 0,
+            "LivingUnit": 0,
+            "BedRooms": 0,
+            "FullBath": 0,
+            "HalfBath": 0,
+        }
+        record = TaxRecord(
+            county="Sedgwick",
+            tax_id="00139705",
+            address="1656 N POPLAR AVE",
+            city="WICHITA",
+            delinquent_years=(2019, 2020, 2021, 2022, 2023, 2024),
+            source_type="foreclosure_exhibit",
+        )
+        rows, _ = enrich_sedgwick_records([record], query_func=lambda where: [attrs])
+        self.assertFalse(is_clearly_nonresidential(rows[0]))
+        candidate = build_candidates(rows, include_unknown_value=False)[0]
+        self.assertIn("vacant/unimproved parcel", candidate.review_reasons)
+
+    def test_tracker_contains_enrichment_columns(self):
+        from app.tax_agent.tracker import candidate_row
+        record = TaxRecord(
+            county="Sedgwick",
+            tax_id="00139705",
+            address="1656 N POPLAR AVE",
+            delinquent_years=(2021, 2022, 2023, 2024),
+            appraised_value=10100,
+            property_class="V | Residential highest and best use",
+            ain="087122100420600200",
+            land_value=10100,
+            improvement_value=0,
+            value_source="Sedgwick County GIS TotVal",
+        )
+        row = candidate_row(build_candidates([record], include_unknown_value=False)[0], 1)
+        self.assertEqual(row["AIN"], "087122100420600200")
+        self.assertEqual(row["Property Class"], "V | Residential highest and best use")
+        self.assertEqual(row["Appraised Value"], "10100.00")
+        self.assertEqual(row["Value Source"], "Sedgwick County GIS TotVal")
+
 if __name__=="__main__": unittest.main()

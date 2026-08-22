@@ -15,7 +15,6 @@ def merge_records(records: Iterable[TaxRecord]) -> list[TaxRecord]:
             merged[key] = record
             continue
         old = merged[key]
-        # A resolved source is authoritative for status when it references the same parcel/cause.
         status = record.status if record.is_resolved else old.status
         if not record.is_resolved and old.is_resolved:
             status = record.status
@@ -39,6 +38,16 @@ def merge_records(records: Iterable[TaxRecord]) -> list[TaxRecord]:
             source_url=" | ".join(dict.fromkeys(source_urls)),
             source_type=record.source_type or old.source_type,
             notes=notes,
+            ain=record.ain or old.ain,
+            land_value=record.land_value if record.land_value is not None else old.land_value,
+            improvement_value=record.improvement_value if record.improvement_value is not None else old.improvement_value,
+            year_built=record.year_built if record.year_built is not None else old.year_built,
+            sfla=record.sfla if record.sfla is not None else old.sfla,
+            living_units=record.living_units if record.living_units is not None else old.living_units,
+            bedrooms=record.bedrooms if record.bedrooms is not None else old.bedrooms,
+            full_baths=record.full_baths if record.full_baths is not None else old.full_baths,
+            half_baths=record.half_baths if record.half_baths is not None else old.half_baths,
+            value_source=record.value_source or old.value_source,
         )
     return list(merged.values())
 
@@ -68,6 +77,7 @@ def score_record(record: TaxRecord, *, max_value: float = 130_000) -> int:
     elif record.years_delinquent == 2:
         score += 20
     score += min(record.years_delinquent, 5) * 5
+
     if record.appraised_value is not None:
         if record.appraised_value <= 100_000:
             score += 15
@@ -83,11 +93,20 @@ def score_record(record: TaxRecord, *, max_value: float = 130_000) -> int:
                 score += 5
     else:
         score -= 5
+
     cls = record.property_class.upper()
     if not cls or any(token in cls for token in ("RES", "SINGLE", "MULTI", "DWELL")):
         score += 5
     if record.address:
         score += 5
+
+    # Prefer improved residential assets over vacant residential lots while
+    # retaining lots for review rather than silently deleting them.
+    if record.improvement_value == 0 and (record.living_units or 0) == 0:
+        score -= 10
+    if record.sfla and record.sfla > 0 and "SINGLE FAMILY" in cls:
+        score += 10
+
     return max(0, min(100, score))
 
 
@@ -104,6 +123,7 @@ def build_candidates(
             continue
         if record.appraised_value is not None and record.appraised_value > max_value:
             continue
+
         reasons: list[str] = []
         if not record.address:
             reasons.append("missing property address")
@@ -115,6 +135,9 @@ def build_candidates(
             reasons.append("annual-list location should be cross-checked")
         if "inferred minimum" in record.notes.lower():
             reasons.append("exact delinquent years require parcel verification")
+        if record.improvement_value == 0 and (record.living_units or 0) == 0:
+            reasons.append("vacant/unimproved parcel")
+
         candidates.append(
             TaxCandidate(
                 record=record,
@@ -124,4 +147,8 @@ def build_candidates(
                 review_reasons=tuple(reasons),
             )
         )
-    return sorted(candidates, key=lambda c: (-c.score, c.record.county, c.record.address, c.record.parcel_id))
+
+    return sorted(
+        candidates,
+        key=lambda c: (-c.score, c.record.county, c.record.address, c.record.parcel_id),
+    )
