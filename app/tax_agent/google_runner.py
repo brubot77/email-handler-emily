@@ -23,6 +23,7 @@ SCOPES = [
 
 DEFAULT_CREDENTIALS_PATH = "/home/brubot77/email-handler-emily/credentials.json"
 DEFAULT_TOKEN_PATH = "/home/brubot77/email-handler-emily/token.json"
+DEFAULT_PARENT_FOLDER_ID = "194YYZgw0gROlsX01LtQGSz-FubP1n2UT"
 
 
 def connect_google():
@@ -48,19 +49,56 @@ def connect_google():
     return drive, sheets
 
 
+def _parent_move_args(current_parents: list[str], folder_id: str) -> tuple[str, str | None]:
+    remove = ",".join(parent for parent in current_parents if parent != folder_id)
+    return folder_id, (remove or None)
+
+
+def ensure_spreadsheet_folder(
+    drive_service,
+    spreadsheet_id: str,
+    folder_id: str,
+) -> bool:
+    """Ensure the spreadsheet lives in the configured BLU Review Docs folder."""
+    meta = drive_service.files().get(
+        fileId=spreadsheet_id,
+        fields="id,parents",
+        supportsAllDrives=True,
+    ).execute()
+
+    current_parents = list(meta.get("parents", []))
+    if folder_id in current_parents:
+        return False
+
+    add_parents, remove_parents = _parent_move_args(current_parents, folder_id)
+    kwargs = {
+        "fileId": spreadsheet_id,
+        "addParents": add_parents,
+        "fields": "id,parents",
+        "supportsAllDrives": True,
+    }
+    if remove_parents:
+        kwargs["removeParents"] = remove_parents
+
+    drive_service.files().update(**kwargs).execute()
+    return True
+
+
 def find_or_create_spreadsheet(
     drive_service,
     sheets_service,
     *,
     spreadsheet_id: str | None,
     name: str,
-) -> tuple[str, bool]:
+    folder_id: str,
+) -> tuple[str, bool, bool]:
     if spreadsheet_id:
         meta = sheets_service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             fields="spreadsheetId,properties(title)",
         ).execute()
-        return meta["spreadsheetId"], False
+        moved = ensure_spreadsheet_folder(drive_service, meta["spreadsheetId"], folder_id)
+        return meta["spreadsheetId"], False, moved
 
     escaped = name.replace("'", "\\'")
     response = drive_service.files().list(
@@ -83,7 +121,8 @@ def find_or_create_spreadsheet(
         )
 
     if files:
-        return files[0]["id"], False
+        moved = ensure_spreadsheet_folder(drive_service, files[0]["id"], folder_id)
+        return files[0]["id"], False, moved
 
     body = {
         "properties": {"title": name},
@@ -93,7 +132,8 @@ def find_or_create_spreadsheet(
         body=body,
         fields="spreadsheetId,properties(title)",
     ).execute()
-    return created["spreadsheetId"], True
+    moved = ensure_spreadsheet_folder(drive_service, created["spreadsheetId"], folder_id)
+    return created["spreadsheetId"], True, moved
 
 
 def main() -> None:
@@ -101,6 +141,11 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="Actually create/update the Google Sheet.")
     parser.add_argument("--spreadsheet-id", default=os.getenv("TAX_AGENT_SPREADSHEET_ID", ""))
     parser.add_argument("--name", default=os.getenv("TAX_AGENT_SPREADSHEET_NAME", DEFAULT_TRACKER_NAME))
+    parser.add_argument(
+        "--folder-id",
+        default=os.getenv("TAX_AGENT_PARENT_FOLDER_ID", DEFAULT_PARENT_FOLDER_ID),
+        help="Google Drive folder for the BLU Delinquent Tax Tracker.",
+    )
     parser.add_argument("--max-value", type=float, default=130000)
     parser.add_argument("--min-years", type=int, default=2)
     args = parser.parse_args()
@@ -131,11 +176,12 @@ def main() -> None:
         return
 
     drive, sheets = connect_google()
-    spreadsheet_id, created = find_or_create_spreadsheet(
+    spreadsheet_id, created, moved = find_or_create_spreadsheet(
         drive,
         sheets,
         spreadsheet_id=args.spreadsheet_id or None,
         name=args.name,
+        folder_id=args.folder_id,
     )
     counts = sync_tracker_tabs(sheets, spreadsheet_id, buckets)
 
@@ -144,6 +190,8 @@ def main() -> None:
     print("  Spreadsheet:", args.name)
     print("  Spreadsheet ID:", spreadsheet_id)
     print("  Created new spreadsheet:", "YES" if created else "NO")
+    print("  Drive folder ID:", args.folder_id)
+    print("  Moved into target folder:", "YES" if moved else "ALREADY THERE")
     for tab, count in counts.items():
         print(f"  {tab:<24} {count:>4}")
     print("  URL:", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}")

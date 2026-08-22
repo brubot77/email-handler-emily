@@ -523,4 +523,25 @@ class Phase6ProductionTests(unittest.TestCase):
         self.assertEqual(row[HEADERS.index("Assigned To")], "Billy")
         self.assertEqual(row[HEADERS.index("Notes")], "Drive-by needed")
 
+
+class Phase61DriveFolderTests(unittest.TestCase):
+    def test_default_tax_tracker_folder_is_blu_review_docs(self):
+        from app.tax_agent.google_runner import DEFAULT_PARENT_FOLDER_ID
+        self.assertEqual(
+            DEFAULT_PARENT_FOLDER_ID,
+            "194YYZgw0gROlsX01LtQGSz-FubP1n2UT",
+        )
+
+    def test_parent_move_args_remove_old_parent(self):
+        from app.tax_agent.google_runner import _parent_move_args
+        add, remove = _parent_move_args(["OLD_PARENT"], "BLU_FOLDER")
+        self.assertEqual(add, "BLU_FOLDER")
+        self.assertEqual(remove, "OLD_PARENT")
+
+    def test_parent_move_args_no_remove_when_already_only_destination(self):
+        from app.tax_agent.google_runner import _parent_move_args
+        add, remove = _parent_move_args(["BLU_FOLDER"], "BLU_FOLDER")
+        self.assertEqual(add, "BLU_FOLDER")
+        self.assertIsNone(remove)
+
 if __name__=="__main__": unittest.main()
