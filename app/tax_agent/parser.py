@@ -95,7 +95,13 @@ def parse_foreclosure_exhibit(text: str, *, county: str, source_url: str = "") -
         )
         address, city, state, zip_code = _split_location(loc_match.group(1) if loc_match else "")
         years_match = re.search(r"(?im)^\s*Delinquent\s+Years\s*:\s*([^\n]+)", block)
-        amount_match = re.search(r"(?im)^\s*Redemption\s+Amount\s*:\s*([^\n]+)", block)
+        # Redemption Amount may appear mid-line after Delinquent Years in PDF
+        # extraction. Capture the numeric amount directly instead of requiring
+        # the field to begin a new line.
+        amount_match = re.search(
+            r"(?i)\bRedemption\s+Amount\s*:\s*\$?\s*([0-9][0-9,]*(?:\.\d{1,2})?)",
+            block,
+        )
         owner_match = re.search(
             r"(?i)\bCurrent\s+Owner(?:\(s\)|s)?\s*:\s*([^\n]+)", block
         )

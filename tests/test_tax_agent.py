@@ -407,4 +407,33 @@ class Phase4EnrichmentTests(unittest.TestCase):
         self.assertEqual(row["Appraised Value"], "10100.00")
         self.assertEqual(row["Value Source"], "Sedgwick County GIS TotVal")
 
+
+class Phase5AmountParsingTests(unittest.TestCase):
+    def test_sedgwick_inline_redemption_amount_is_parsed(self):
+        sample = """
+Parcel No. 134
+Tax ID No. 00128036
+Approximate Location: 1318 E ALINE ST, WICHITA, KS 67211
+Delinquent Years: 2021-2024 Redemption Amount: $4,415.27
+Current Owners: TEST OWNER
+"""
+        row = parse_foreclosure_exhibit(sample, county="Sedgwick")[0]
+        self.assertEqual(row.amount_due, 4415.27)
+        self.assertEqual(row.delinquent_years, (2021, 2022, 2023, 2024))
+
+    def test_missing_redemption_amount_remains_unknown_not_zero(self):
+        from app.tax_agent.tracker import candidate_row
+        record = TaxRecord(
+            county="Sedgwick",
+            tax_id="00128036",
+            address="1318 E ALINE ST",
+            delinquent_years=(2021, 2022, 2023, 2024),
+            appraised_value=47160,
+            property_class="R | Single family residence (detached)",
+            source_type="foreclosure_exhibit",
+        )
+        row = candidate_row(build_candidates([record], include_unknown_value=False)[0], 1)
+        self.assertEqual(row["Amount Due"], "")
+        self.assertEqual(row["Tax/Value %"], "")
+
 if __name__=="__main__": unittest.main()
