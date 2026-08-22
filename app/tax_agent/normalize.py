@@ -34,6 +34,10 @@ def normalize_address(value: str) -> str:
 
 def record_key(county: str, parcel_id: str, tax_id: str, address: str, city: str = "") -> str:
     county_key = normalize_space(county).upper()
+    # Harvey foreclosure notices identify records by cause number in later
+    # redemption updates, so prefer that stable cause key when present.
+    if tax_id.strip().upper().startswith("CAUSE-"):
+        return f"{county_key}|TAXID|{re.sub(r'[^A-Z0-9]', '', tax_id.upper())}"
     if parcel_id.strip():
         return f"{county_key}|PARCEL|{re.sub(r'[^A-Z0-9]', '', parcel_id.upper())}"
     if tax_id.strip():

@@ -15,7 +15,7 @@ def merge_records(records: Iterable[TaxRecord]) -> list[TaxRecord]:
             merged[key] = record
             continue
         old = merged[key]
-        # A resolved source is authoritative for status when it references the same parcel.
+        # A resolved source is authoritative for status when it references the same parcel/cause.
         status = record.status if record.is_resolved else old.status
         if not record.is_resolved and old.is_resolved:
             status = record.status
@@ -46,7 +46,7 @@ def merge_records(records: Iterable[TaxRecord]) -> list[TaxRecord]:
 def foreclosure_stage(record: TaxRecord) -> str:
     if record.is_resolved:
         return "Resolved"
-    if record.source_type == "foreclosure_exhibit":
+    if record.source_type in {"foreclosure_exhibit", "foreclosure_notice"}:
         return "Foreclosure filed"
     if record.years_delinquent >= 4:
         return "Foreclosure likely/overdue"
@@ -61,7 +61,7 @@ def score_record(record: TaxRecord, *, max_value: float = 130_000) -> int:
     if record.is_resolved:
         return 0
     score = 0
-    if record.source_type == "foreclosure_exhibit":
+    if record.source_type in {"foreclosure_exhibit", "foreclosure_notice"}:
         score += 40
     elif record.years_delinquent >= 3:
         score += 30
@@ -113,6 +113,8 @@ def build_candidates(
                 continue
         if record.source_type == "annual_publication":
             reasons.append("annual-list location should be cross-checked")
+        if "inferred minimum" in record.notes.lower():
+            reasons.append("exact delinquent years require parcel verification")
         candidates.append(
             TaxCandidate(
                 record=record,
