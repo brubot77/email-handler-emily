@@ -6,6 +6,7 @@ from typing import Iterable
 
 from .models import TaxCandidate
 from .normalize import record_key
+from .production import consecutive_latest_years
 
 HEADERS = [
     "Record Key",
@@ -23,6 +24,8 @@ HEADERS = [
     "Property Class",
     "Years Delinquent",
     "Delinquent Years",
+    "Consecutive Latest Years",
+    "Consecutive Latest Count",
     "Amount Due",
     "Appraised Value",
     "Land Value",
@@ -75,6 +78,8 @@ def candidate_row(candidate: TaxCandidate, rank: int) -> dict[str, str]:
         "Property Class": r.property_class,
         "Years Delinquent": str(r.years_delinquent),
         "Delinquent Years": ",".join(str(y) for y in r.delinquent_years),
+        "Consecutive Latest Years": ",".join(str(y) for y in consecutive_latest_years(r)),
+        "Consecutive Latest Count": str(len(consecutive_latest_years(r))),
         "Amount Due": "" if r.amount_due is None else f"{r.amount_due:.2f}",
         "Appraised Value": "" if r.appraised_value is None else f"{r.appraised_value:.2f}",
         "Land Value": "" if r.land_value is None else f"{r.land_value:.2f}",

@@ -1159,4 +1159,83 @@ class Phase7CHarveyCurrentTaxTests(unittest.TestCase):
             )
         self.assertEqual(fake.calls, 3)
 
+
+class Phase8HarveyProductionIntegrationTests(unittest.TestCase):
+    def test_consecutive_latest_years_stops_at_gap(self):
+        from app.tax_agent.models import TaxRecord
+        from app.tax_agent.production import consecutive_latest_years
+        r = TaxRecord(county="Harvey", delinquent_years=(2021, 2022, 2024, 2025))
+        self.assertEqual(consecutive_latest_years(r), (2024, 2025))
+
+    def test_harvey_improved_residential_is_acquisition_without_sfla(self):
+        from app.tax_agent.models import TaxCandidate, TaxRecord
+        from app.tax_agent.production import ACQUISITION_TAB, bucket_candidates
+        r = TaxRecord(county="Harvey", address="130 JEFFERSON AVE", city="Sedgwick",
+                      property_class="Residential", improvement_value=31070,
+                      appraised_value=44870, delinquent_years=(2023, 2024, 2025))
+        c = TaxCandidate(r, 80, "Foreclosure eligible", False)
+        self.assertEqual(len(bucket_candidates([c])[ACQUISITION_TAB]), 1)
+
+    def test_harvey_zero_improvement_is_secondary(self):
+        from app.tax_agent.models import TaxCandidate, TaxRecord
+        from app.tax_agent.production import ACQUISITION_TAB, SECONDARY_TAB, bucket_candidates
+        r = TaxRecord(county="Harvey", address="100 TEST ST", city="Newton",
+                      property_class="Residential", improvement_value=0,
+                      appraised_value=20000, delinquent_years=(2024, 2025))
+        c = TaxCandidate(r, 60, "Early warning", True)
+        b = bucket_candidates([c])
+        self.assertEqual(len(b[ACQUISITION_TAB]), 0)
+        self.assertEqual(len(b[SECONDARY_TAB]), 1)
+
+    def test_bucket_order_prefers_longer_consecutive_run(self):
+        from app.tax_agent.models import TaxCandidate, TaxRecord
+        from app.tax_agent.production import ACQUISITION_TAB, bucket_candidates
+        short = TaxCandidate(TaxRecord(county="Harvey", address="1 SHORT ST",
+            property_class="Residential", improvement_value=50000,
+            appraised_value=80000, delinquent_years=(2021, 2022, 2024, 2025)),
+            95, "Foreclosure likely/overdue", False)
+        long = TaxCandidate(TaxRecord(county="Harvey", address="2 LONG ST",
+            property_class="Residential", improvement_value=50000,
+            appraised_value=80000, delinquent_years=(2022, 2023, 2024, 2025)),
+            80, "Foreclosure likely/overdue", False)
+        rows = bucket_candidates([short, long])[ACQUISITION_TAB]
+        self.assertEqual(rows[0].record.address, "2 LONG ST")
+
+    def test_tracker_outputs_consecutive_columns(self):
+        from app.tax_agent.models import TaxCandidate, TaxRecord
+        from app.tax_agent.tracker import HEADERS, candidate_row
+        r = TaxRecord(county="Harvey", address="500 E 2ND ST",
+                      delinquent_years=(2021, 2022, 2024, 2025))
+        c = TaxCandidate(r, 50, "Early warning", False)
+        row = candidate_row(c, 1)
+        self.assertIn("Consecutive Latest Years", HEADERS)
+        self.assertIn("Consecutive Latest Count", HEADERS)
+        self.assertEqual(row["Consecutive Latest Years"], "2024,2025")
+        self.assertEqual(row["Consecutive Latest Count"], "2")
+
+
+    def test_consecutive_latest_count_formats_as_integer(self):
+        from app.tax_agent.sheets import _format_tab_requests
+        from app.tax_agent.tracker import HEADERS
+
+        count_idx = HEADERS.index("Consecutive Latest Count")
+        requests = _format_tab_requests(12345, 10)
+
+        matching = []
+        for request in requests:
+            repeat = request.get("repeatCell")
+            if not repeat:
+                continue
+            grid = repeat.get("range", {})
+            if (
+                grid.get("startColumnIndex") == count_idx
+                and grid.get("endColumnIndex") == count_idx + 1
+            ):
+                matching.append(repeat)
+
+        self.assertTrue(matching)
+        number_format = matching[-1]["cell"]["userEnteredFormat"]["numberFormat"]
+        self.assertEqual(number_format["type"], "NUMBER")
+        self.assertEqual(number_format["pattern"], "0")
+
 if __name__=="__main__": unittest.main()

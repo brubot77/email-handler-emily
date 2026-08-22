@@ -17,18 +17,61 @@ def is_residential_record(record: TaxRecord) -> bool:
     return any(token in text for token in ("RESIDENTIAL", "SINGLE FAMILY", "DUPLEX"))
 
 
+def consecutive_latest_years(record: TaxRecord) -> tuple[int, ...]:
+    years = set(record.delinquent_years)
+    if not years:
+        return ()
+    latest = max(years)
+    run = []
+    year = latest
+    while year in years:
+        run.append(year)
+        year -= 1
+    return tuple(sorted(run))
+
+
 def is_improved_dwelling(record: TaxRecord) -> bool:
     text = (record.property_class or "").upper()
-    return (
+    if not (
         is_residential_record(record)
         and bool((record.address or "").strip())
         and (record.improvement_value or 0) > 0
-        and (record.sfla or 0) > 0
-        and (
-            (record.living_units or 0) >= 1
-            or "SINGLE FAMILY" in text
-            or "DUPLEX" in text
-        )
+    ):
+        return False
+
+    if (record.sfla or 0) > 0 and (
+        (record.living_units or 0) >= 1
+        or "SINGLE FAMILY" in text
+        or "DUPLEX" in text
+    ):
+        return True
+
+    # Harvey GIS exposes Residential classification and building value but
+    # not the detailed SFLA/bed/bath fields used by Sedgwick.
+    return (
+        record.county.strip().lower() == "harvey"
+        and "RESIDENTIAL" in text
+    )
+
+
+def production_priority_key(candidate: TaxCandidate) -> tuple:
+    record = candidate.record
+    consecutive = consecutive_latest_years(record)
+    filed = 1 if record.source_type in {"foreclosure_exhibit", "foreclosure_notice"} else 0
+    ratio = (
+        record.amount_due / record.appraised_value
+        if record.amount_due is not None and record.appraised_value
+        else 0.0
+    )
+    return (
+        -filed,
+        -len(consecutive),
+        -record.years_delinquent,
+        -candidate.score,
+        -ratio,
+        record.county,
+        record.address,
+        record.parcel_id,
     )
 
 
@@ -47,5 +90,8 @@ def bucket_candidates(
             buckets[SECONDARY_TAB].append(candidate)
         else:
             buckets[OTHER_TAB].append(candidate)
+
+    for rows in buckets.values():
+        rows.sort(key=production_priority_key)
 
     return buckets

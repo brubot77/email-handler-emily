@@ -104,6 +104,7 @@ def _typed_candidate_row(
     typed["Rank"] = rank
     typed["Score"] = candidate.score
     typed["Years Delinquent"] = r.years_delinquent
+    typed["Consecutive Latest Count"] = len(tuple(y for y in str(row.get("Consecutive Latest Years", "")).split(",") if y.strip()))
     typed["Amount Due"] = r.amount_due
     typed["Appraised Value"] = r.appraised_value
     typed["Land Value"] = r.land_value
@@ -247,6 +248,7 @@ def _format_tab_requests(sheet_id: int, row_count: int) -> list[dict]:
         "Owner": 190,
         "Property Class": 240,
         "Delinquent Years": 140,
+        "Consecutive Latest Years": 165,
         "Value Source": 170,
         "Source URL": 280,
         "Review Reasons": 220,
@@ -290,6 +292,26 @@ def _format_tab_requests(sheet_id: int, row_count: int) -> list[dict]:
                 }
             }
         )
+
+    count_idx = HEADERS.index("Consecutive Latest Count")
+    requests.append(
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 1,
+                    "startColumnIndex": count_idx,
+                    "endColumnIndex": count_idx + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {"type": "NUMBER", "pattern": "0"}
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }
+    )
 
     pct_idx = HEADERS.index("Tax/Value %")
     requests.append(

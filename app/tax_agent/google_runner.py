@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections import Counter
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -10,6 +11,8 @@ from googleapiclient.discovery import build
 
 from .core import build_candidates
 from .enrichment import enrich_sedgwick_records, is_clearly_nonresidential
+from .harvey_current_tax import verify_harvey_records
+from .harvey_publication import enrich_harvey_publication_rows, load_harvey_publication_history, publication_history_candidates
 from .production import bucket_candidates, PRODUCTION_TABS
 from .sheets import DEFAULT_TRACKER_NAME, sync_tracker_tabs
 from .sources import collect_live_records
@@ -150,10 +153,25 @@ def main() -> None:
     parser.add_argument("--min-years", type=int, default=2)
     args = parser.parse_args()
 
-    records, source_audit = collect_live_records({"Sedgwick"})
-    records, enrich_audit = enrich_sedgwick_records(records)
+    sedgwick_records, source_audit = collect_live_records({"Sedgwick"})
+    sedgwick_records, enrich_audit = enrich_sedgwick_records(sedgwick_records)
+    sedgwick_records = [r for r in sedgwick_records if not is_clearly_nonresidential(r)]
 
-    records = [r for r in records if not is_clearly_nonresidential(r)]
+    harvey_history, harvey_source_audit = load_harvey_publication_history()
+    harvey_history = [r for r in harvey_history if r.years_delinquent >= args.min_years]
+    harvey_enriched, harvey_enrich_audit = enrich_harvey_publication_rows(harvey_history)
+    harvey_discovery = publication_history_candidates(
+        harvey_enriched, min_publication_years=args.min_years, max_value=args.max_value
+    )
+    harvey_verified, harvey_verify_audit = verify_harvey_records(
+        [c.record for c in harvey_discovery], sleep_seconds=0.15, limit=0
+    )
+    harvey_verified = [
+        r for r in harvey_verified
+        if r.years_delinquent >= args.min_years and not is_clearly_nonresidential(r)
+    ]
+
+    records = sedgwick_records + harvey_verified
     candidates = build_candidates(
         records,
         min_years=args.min_years,
@@ -162,13 +180,19 @@ def main() -> None:
     )
     buckets = bucket_candidates(candidates)
 
-    print("Phase 6 production preview:")
-    print(
-        "  Sedgwick enrichment: "
-        + ", ".join(f"{key}={value}" for key, value in enrich_audit.items())
-    )
+    print("Phase 8 Sedgwick + Harvey production preview:")
+    print("  Sedgwick enrichment: " + ", ".join(f"{k}={v}" for k, v in enrich_audit.items()))
+    print("  Harvey publication sources:")
+    for tax_year, url, count, status in harvey_source_audit:
+        print(f"    tax_year={tax_year} rows={count:<4} {status:<20} {url}")
+    print("  Harvey GIS enrichment: " + ", ".join(f"{k}={v}" for k, v in harvey_enrich_audit.items()))
+    print("  Harvey current-tax verification: " + ", ".join(f"{k}={v}" for k, v in harvey_verify_audit.items()))
+    print(f"  Harvey verified production rows (>= {args.min_years} unpaid years): {len(harvey_verified)}")
+    print()
     for tab, rows in buckets.items():
-        print(f"  {tab:<24} {len(rows):>4}")
+        by_county = Counter(c.record.county for c in rows)
+        detail = ", ".join(f"{county}={count}" for county, count in sorted(by_county.items()))
+        print(f"  {tab:<24} {len(rows):>4}" + (f"  ({detail})" if detail else ""))
     print(f"  {'TOTAL':<24} {sum(len(v) for v in buckets.values()):>4}")
 
     if not args.apply:
