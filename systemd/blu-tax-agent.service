@@ -1,0 +1,13 @@
+[Unit]
+Description=BLU Delinquent Property Tax Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/brubot77/email-handler-emily
+ExecStart=/home/brubot77/email-handler-emily/venv/bin/python -m app.tax_agent_runner --dry-run --input-json /home/brubot77/email-handler-emily/tax_agent_input.json
+User=brubot77
+Group=brubot77
+
+# Intentionally controlled-input and dry-run in first release.

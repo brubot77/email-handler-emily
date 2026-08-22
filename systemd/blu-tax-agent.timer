@@ -1,0 +1,10 @@
+[Unit]
+Description=BLU Tax Agent weekly timer (DO NOT ENABLE BEFORE LIVE VALIDATION)
+
+[Timer]
+OnCalendar=Mon *-*-* 07:00:00
+Persistent=true
+Unit=blu-tax-agent.service
+
+[Install]
+WantedBy=timers.target
