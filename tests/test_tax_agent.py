@@ -436,4 +436,91 @@ Current Owners: TEST OWNER
         self.assertEqual(row["Amount Due"], "")
         self.assertEqual(row["Tax/Value %"], "")
 
+
+class Phase6ProductionTests(unittest.TestCase):
+    def _candidate(self, **kwargs):
+        base = dict(
+            county="Sedgwick",
+            tax_id="00123456",
+            address="100 N TEST ST",
+            city="WICHITA",
+            delinquent_years=(2021, 2022, 2023, 2024),
+            appraised_value=80000,
+            property_class="R | Single family residence (detached)",
+            improvement_value=60000,
+            sfla=1000,
+            living_units=1,
+            amount_due=4000,
+            source_type="foreclosure_exhibit",
+        )
+        base.update(kwargs)
+        return build_candidates([TaxRecord(**base)], include_unknown_value=False)[0]
+
+    def test_production_bucket_primary_secondary_other(self):
+        from app.tax_agent.production import (
+            ACQUISITION_TAB, SECONDARY_TAB, OTHER_TAB, bucket_candidates
+        )
+        primary = self._candidate(tax_id="00111111")
+        secondary = self._candidate(
+            tax_id="00222222",
+            property_class="R | Accessory residential support use (garage/shed)",
+            sfla=0,
+            living_units=0,
+        )
+        other = self._candidate(
+            tax_id="00333333",
+            address="",
+            property_class="V | Residential highest and best use",
+            improvement_value=0,
+            sfla=0,
+            living_units=0,
+        )
+        buckets = bucket_candidates([primary, secondary, other])
+        self.assertEqual(len(buckets[ACQUISITION_TAB]), 1)
+        self.assertEqual(len(buckets[SECONDARY_TAB]), 1)
+        self.assertEqual(len(buckets[OTHER_TAB]), 1)
+
+    def test_duplex_is_acquisition_candidate(self):
+        from app.tax_agent.production import is_improved_dwelling
+        candidate = self._candidate(
+            property_class="R | Duplex",
+            living_units=2,
+            bedrooms=4,
+            full_baths=2,
+        )
+        self.assertTrue(is_improved_dwelling(candidate.record))
+
+    def test_sheet_column_letter_extends_beyond_z(self):
+        from app.tax_agent.sheets import a1_col
+        self.assertEqual(a1_col(26), "Z")
+        self.assertEqual(a1_col(27), "AA")
+        self.assertEqual(a1_col(35), "AI")
+
+    def test_google_sheet_values_keep_pin_text_and_money_numeric(self):
+        from app.tax_agent.sheets import build_sheet_values
+        from app.tax_agent.tracker import HEADERS
+        candidate = self._candidate(tax_id="00123456", amount_due=4321.50)
+        values = build_sheet_values([candidate])
+        row = values[1]
+        self.assertEqual(row[HEADERS.index("Tax ID")], "00123456")
+        self.assertEqual(row[HEADERS.index("Amount Due")], 4321.50)
+        self.assertEqual(row[HEADERS.index("Appraised Value")], 80000)
+
+    def test_google_manual_fields_override_generated_defaults(self):
+        from app.tax_agent.sheets import build_sheet_values
+        from app.tax_agent.tracker import HEADERS, candidate_row
+        candidate = self._candidate()
+        key = candidate_row(candidate, 1)["Record Key"]
+        manual = {
+            key: {
+                "Review Status": "RESEARCH",
+                "Assigned To": "Billy",
+                "Notes": "Drive-by needed",
+            }
+        }
+        row = build_sheet_values([candidate], manual)[1]
+        self.assertEqual(row[HEADERS.index("Review Status")], "RESEARCH")
+        self.assertEqual(row[HEADERS.index("Assigned To")], "Billy")
+        self.assertEqual(row[HEADERS.index("Notes")], "Drive-by needed")
+
 if __name__=="__main__": unittest.main()
