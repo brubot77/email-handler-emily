@@ -718,4 +718,445 @@ Taxes for the year 2025 and prior years - $11,019.13
         )
         self.assertEqual([c.record.tax_id for c in rows], ["08943"])
 
+
+class Phase7BHarveyPublicationTests(unittest.TestCase):
+    def test_flat_publication_parser_handles_numbered_owner(self):
+        from app.tax_agent.harvey_publication import parse_harvey_annual_publication
+        text = """
+State of Kansas, County of Harvey.
+Name Property Address Total Due
+#1 WICHITA INVESTMENTS LLC 126 W 1ST ST-Newton, KS 67114 $1022.45
+AGUILAR, EDGAR 409 E 2ND ST -Newton, KS 67114 $1654.01
+"""
+        rows = parse_harvey_annual_publication(text, tax_year=2025)
+        self.assertEqual(len(rows), 2)
+        by_addr = {r.address: r for r in rows}
+        self.assertIn("126 W 1ST ST", by_addr)
+        self.assertEqual(by_addr["126 W 1ST ST"].amount_due, 1022.45)
+        self.assertEqual(by_addr["126 W 1ST ST"].delinquent_years, (2025,))
+        self.assertEqual(by_addr["409 E 2ND ST"].city.upper(), "NEWTON")
+
+    def test_publication_parser_chooses_last_house_number(self):
+        from app.tax_agent.harvey_publication import parse_harvey_annual_publication
+        text = "625 N MAIN LLC 625 N MAIN ST - Newton, KS 67114 $8151.65"
+        row = parse_harvey_annual_publication(text, tax_year=2025)[0]
+        self.assertEqual(row.address, "625 N MAIN ST")
+        self.assertIn("625 N MAIN LLC", row.owner)
+
+    def test_publication_parser_handles_multiline_pdf_text(self):
+        from app.tax_agent.harvey_publication import parse_harvey_annual_publication
+        text = """
+ALLSHOUSE, KENT J & SHERI L
+519 CEDAR RIDGE DR - Newton, KS 67114
+$2,825.32
+AGUILAR, EDGAR
+436 S KANSAS AVE - Newton, KS 67114
+$929.97
+"""
+        rows = parse_harvey_annual_publication(text, tax_year=2024)
+        self.assertEqual(
+            {r.address for r in rows},
+            {"519 CEDAR RIDGE DR", "436 S KANSAS AVE"},
+        )
+
+    def test_publication_history_intersects_by_property_not_owner(self):
+        from app.tax_agent.harvey_publication import build_publication_history
+        current = [
+            TaxRecord(
+                county="Harvey",
+                address="126 W 1ST ST",
+                city="Newton",
+                owner="NEW OWNER LLC",
+                delinquent_years=(2025,),
+                source_type="annual_publication",
+            )
+        ]
+        prior = {
+            2024: [
+                TaxRecord(
+                    county="Harvey",
+                    address="126 W 1ST STREET",
+                    city="Newton",
+                    owner="OLD OWNER LLC",
+                    delinquent_years=(2024,),
+                )
+            ],
+            2023: [
+                TaxRecord(
+                    county="Harvey",
+                    address="126 W 1ST ST",
+                    city="Newton",
+                    delinquent_years=(2023,),
+                )
+            ],
+        }
+        row = build_publication_history(current, prior)[0]
+        self.assertEqual(row.delinquent_years, (2023, 2024, 2025))
+
+    def test_publication_history_does_not_invent_missing_year(self):
+        from app.tax_agent.harvey_publication import build_publication_history
+        current = [
+            TaxRecord(
+                county="Harvey",
+                address="1 TEST ST",
+                city="Newton",
+                delinquent_years=(2025,),
+            )
+        ]
+        prior = {
+            2024: [],
+            2023: [
+                TaxRecord(
+                    county="Harvey",
+                    address="1 TEST ST",
+                    city="Newton",
+                    delinquent_years=(2023,),
+                )
+            ],
+        }
+        row = build_publication_history(current, prior)[0]
+        self.assertEqual(row.delinquent_years, (2023, 2025))
+
+    def test_gis_enrichment_matches_exact_normalized_situs(self):
+        from app.tax_agent.harvey_publication import enrich_harvey_publication_rows
+        row = TaxRecord(
+            county="Harvey",
+            address="224 OLD MAIN ST",
+            city="Newton",
+            delinquent_years=(2024, 2025),
+            source_type="annual_publication",
+        )
+        features = [{
+            "FID": 1,
+            "TaxID": "08943",
+            "PIDNO": "0942001008006000",
+            "SitusAddre": "224 OLD MAIN ST, Newton, KS  67114",
+            "PriOwnerNa": "HARMS FAMILY TRUST",
+            "PropertyTy": "Residential",
+            "FLV": 6520,
+            "FBV": 31480,
+            "FTV": 38000,
+            "Weblink": "x",
+            "QuickRefID": "R10438",
+            "PropNum": "040-x",
+        }]
+        rows, audit = enrich_harvey_publication_rows(
+            [row],
+            parcel_features=features,
+        )
+        self.assertEqual(rows[0].tax_id, "08943")
+        self.assertEqual(rows[0].ain, "0942001008006000")
+        self.assertEqual(rows[0].appraised_value, 38000)
+        self.assertEqual(audit["exact_address_city_matches"], 1)
+
+    def test_gis_enrichment_refuses_ambiguous_address(self):
+        from app.tax_agent.harvey_publication import enrich_harvey_publication_rows
+        row = TaxRecord(
+            county="Harvey",
+            address="100 MAIN ST",
+            city="Newton",
+            delinquent_years=(2024, 2025),
+        )
+        base = {
+            "SitusAddre": "100 MAIN ST, Newton, KS 67114",
+            "PriOwnerNa": "X",
+            "PropertyTy": "Residential",
+            "FLV": 1,
+            "FBV": 1,
+            "FTV": 2,
+            "Weblink": "x",
+            "QuickRefID": "x",
+            "PropNum": "x",
+        }
+        features = [
+            dict(base, FID=1, TaxID="1", PIDNO="111"),
+            dict(base, FID=2, TaxID="2", PIDNO="222"),
+        ]
+        rows, audit = enrich_harvey_publication_rows(
+            [row],
+            parcel_features=features,
+        )
+        self.assertEqual(rows[0].tax_id, "")
+        self.assertEqual(audit["ambiguous"], 1)
+
+    def test_history_candidate_requires_residential_verified_value(self):
+        from app.tax_agent.harvey_publication import publication_history_candidates
+        good = TaxRecord(
+            county="Harvey",
+            address="1 GOOD ST",
+            city="Newton",
+            tax_id="1",
+            ain="111",
+            delinquent_years=(2024, 2025),
+            appraised_value=80000,
+            property_class="Residential",
+            source_type="annual_publication",
+        )
+        vacant = TaxRecord(
+            county="Harvey",
+            address="2 LOT ST",
+            city="Newton",
+            tax_id="2",
+            ain="222",
+            delinquent_years=(2024, 2025),
+            appraised_value=10000,
+            property_class="Vacant",
+            source_type="annual_publication",
+        )
+        high = TaxRecord(
+            county="Harvey",
+            address="3 HIGH ST",
+            city="Newton",
+            tax_id="3",
+            ain="333",
+            delinquent_years=(2024, 2025),
+            appraised_value=150000,
+            property_class="Residential",
+            source_type="annual_publication",
+        )
+        candidates = publication_history_candidates(
+            [good, vacant, high],
+            max_value=130000,
+        )
+        self.assertEqual([c.record.address for c in candidates], ["1 GOOD ST"])
+
+
+    def test_harvey_gis_loader_paginates_past_record_cap(self):
+        from app.tax_agent.harvey_publication import _query_all_harvey_parcels
+
+        calls = []
+
+        def fake_page(where, page_size):
+            calls.append((where, page_size))
+            if where == "FID > -1":
+                return [{"FID": 1}, {"FID": 2}]
+            if where == "FID > 2":
+                return [{"FID": 3}, {"FID": 4}]
+            if where == "FID > 4":
+                return [{"FID": 5}]
+            return []
+
+        rows = _query_all_harvey_parcels(
+            page_size=2,
+            query_page=fake_page,
+        )
+
+        self.assertEqual([r["FID"] for r in rows], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            [where for where, _ in calls],
+            ["FID > -1", "FID > 2", "FID > 4"],
+        )
+
+
+class Phase7CHarveyCurrentTaxTests(unittest.TestCase):
+    def test_tax_table_sums_multiple_lines_per_year(self):
+        from app.tax_agent.harvey_current_tax import parse_tax_year_table
+        html = """
+<table>
+<tr><th>Year</th><th>Statement #</th><th>Line #</th><th>Total Due*</th><th>1st Half Paid</th><th>2nd Half Paid</th></tr>
+<tr><td>2025</td><td>1</td><td>001</td><td>828.23</td><td>No</td><td>No</td></tr>
+<tr><td>2025</td><td>1</td><td>002</td><td>36.19</td><td>No</td><td>No</td></tr>
+</table>
+"""
+        rows = parse_tax_year_table(html)
+        self.assertEqual(rows[2025].total_due, 864.42)
+        self.assertEqual(rows[2025].line_count, 2)
+        self.assertFalse(rows[2025].first_half_paid)
+        self.assertFalse(rows[2025].second_half_paid)
+
+    def test_tax_history_parser_handles_owner_id_column(self):
+        from app.tax_agent.harvey_current_tax import parse_tax_year_table
+        html = """
+<table>
+<tr><th>Year</th><th>Owner ID</th><th>Statement #</th><th>Line #</th><th>Total Due*</th><th>1st Half Paid</th><th>2nd Half Paid</th></tr>
+<tr><td>2024</td><td>ABC</td><td>1</td><td>001</td><td>868.01</td><td>No</td><td>No</td></tr>
+<tr><td>2024</td><td>ABC</td><td>1</td><td>002</td><td>39.56</td><td>No</td><td>No</td></tr>
+</table>
+"""
+        rows = parse_tax_year_table(html)
+        self.assertEqual(rows[2024].total_due, 907.57)
+
+    def test_partial_payment_still_counts_as_unpaid(self):
+        from app.tax_agent.harvey_current_tax import (
+            TaxYearStatus,
+            unpaid_tax_years,
+        )
+        rows = {
+            2022: TaxYearStatus(
+                2022, 966.95, True, False, 2
+            )
+        }
+        self.assertEqual(unpaid_tax_years(rows), (2022,))
+
+    def test_fully_paid_zero_balance_not_unpaid(self):
+        from app.tax_agent.harvey_current_tax import (
+            TaxYearStatus,
+            unpaid_tax_years,
+        )
+        rows = {
+            2019: TaxYearStatus(
+                2019, 0.0, True, True, 3
+            )
+        }
+        self.assertEqual(unpaid_tax_years(rows), ())
+
+    def test_consecutive_unpaid_years_stops_at_paid_gap(self):
+        from app.tax_agent.harvey_current_tax import (
+            TaxYearStatus,
+            consecutive_unpaid_years,
+        )
+        rows = {
+            2025: TaxYearStatus(2025, 100, False, False, 1),
+            2024: TaxYearStatus(2024, 100, False, False, 1),
+            2023: TaxYearStatus(2023, 100, False, False, 1),
+            2022: TaxYearStatus(2022, 0, True, True, 1),
+            2021: TaxYearStatus(2021, 100, False, False, 1),
+        }
+        self.assertEqual(
+            consecutive_unpaid_years(rows, current_year=2025),
+            (2023, 2024, 2025),
+        )
+
+    def test_apply_verification_replaces_publication_amount(self):
+        from app.tax_agent.harvey_current_tax import (
+            TaxYearStatus,
+            apply_current_tax_verification,
+        )
+        record = TaxRecord(
+            county="Harvey",
+            address="130 JEFFERSON AVE",
+            city="Sedgwick",
+            tax_id="13931",
+            ain="1383403020007000",
+            delinquent_years=(2024, 2025),
+            amount_due=864.42,
+            appraised_value=40140,
+            property_class="Residential",
+        )
+        result = {
+            "found_due": True,
+            "identity_verified": True,
+            "result_url": "https://example.test/result",
+            "statuses": {
+                2025: TaxYearStatus(2025, 864.42, False, False, 2),
+                2024: TaxYearStatus(2024, 907.57, False, False, 2),
+                2023: TaxYearStatus(2023, 1556.83, False, False, 3),
+            },
+        }
+        row = apply_current_tax_verification(record, result)
+        self.assertEqual(row.delinquent_years, (2023, 2024, 2025))
+        self.assertEqual(row.amount_due, 3328.82)
+        self.assertEqual(row.source_type, "current_tax_verified")
+        self.assertIn("Treasurer payoff required", row.notes)
+
+    def test_apply_verification_drops_no_due_result(self):
+        from app.tax_agent.harvey_current_tax import apply_current_tax_verification
+        record = TaxRecord(
+            county="Harvey",
+            address="1 TEST ST",
+            city="Newton",
+        )
+        result = {
+            "found_due": False,
+            "identity_verified": False,
+            "statuses": {},
+        }
+        self.assertIsNone(apply_current_tax_verification(record, result))
+
+    def test_identity_verification_uses_exact_pidno_link(self):
+        from app.tax_agent.harvey_current_tax import HarveyCurrentTaxClient
+        html = """
+<a href="https://ks1355.cichosting.com/webportal/appraiser/Details.aspx?pid=0941704012011000">Real Estate Detail</a>
+"""
+        self.assertTrue(
+            HarveyCurrentTaxClient._verify_result_identity(
+                html,
+                pidno="0941704012011000",
+                tax_id="07440",
+            )
+        )
+        self.assertFalse(
+            HarveyCurrentTaxClient._verify_result_identity(
+                html,
+                pidno="9999999999999999",
+                tax_id="99999",
+            )
+        )
+
+
+    def test_gap_year_does_not_count_as_three_consecutive_latest(self):
+        from app.tax_agent.harvey_current_tax import (
+            TaxYearStatus,
+            consecutive_unpaid_years,
+        )
+        statuses = {
+            2025: TaxYearStatus(2025, 1.0, False, False, 1),
+            2024: TaxYearStatus(2024, 1.0, False, False, 1),
+            2022: TaxYearStatus(2022, 1.0, False, False, 1),
+            2021: TaxYearStatus(2021, 1.0, False, False, 1),
+        }
+        self.assertEqual(
+            consecutive_unpaid_years(statuses, current_year=2025),
+            (2024, 2025),
+        )
+
+    def test_request_retries_transient_urlerror(self):
+        from urllib.error import URLError
+        from app.tax_agent.harvey_current_tax import HarveyCurrentTaxClient
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+            def geturl(self):
+                return "https://example.test/final"
+            def read(self):
+                return b"ok"
+
+        class FakeOpener:
+            def __init__(self):
+                self.calls = 0
+            def open(self, request, timeout=0):
+                self.calls += 1
+                if self.calls < 3:
+                    raise URLError("timed out")
+                return FakeResponse()
+
+        client = HarveyCurrentTaxClient(timeout=1)
+        fake = FakeOpener()
+        client.opener = fake
+
+        url, text = client._request(
+            "https://example.test/start",
+            attempts=3,
+            retry_delay=0,
+        )
+        self.assertEqual(fake.calls, 3)
+        self.assertEqual(url, "https://example.test/final")
+        self.assertEqual(text, "ok")
+
+    def test_request_raises_after_retry_limit(self):
+        from urllib.error import URLError
+        from app.tax_agent.harvey_current_tax import HarveyCurrentTaxClient
+
+        class FakeOpener:
+            def __init__(self):
+                self.calls = 0
+            def open(self, request, timeout=0):
+                self.calls += 1
+                raise URLError("timed out")
+
+        client = HarveyCurrentTaxClient(timeout=1)
+        fake = FakeOpener()
+        client.opener = fake
+
+        with self.assertRaises(URLError):
+            client._request(
+                "https://example.test/start",
+                attempts=3,
+                retry_delay=0,
+            )
+        self.assertEqual(fake.calls, 3)
+
 if __name__=="__main__": unittest.main()
