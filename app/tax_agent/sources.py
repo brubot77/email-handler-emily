@@ -48,7 +48,10 @@ COUNTY_SOURCES: tuple[CountySource, ...] = (
             "https://www.bucoks.gov/501/Real-Estate-Taxes",
             "https://www.bucoks.gov/502/Tax-Foreclosure-Sale-Information",
         ),
-        frozenset({"www.bucoks.gov", "bucoks.gov", "www.bucoks.com", "bucoks.com"}),
+        frozenset({
+            "www.bucoks.gov", "bucoks.gov", "www.bucoks.com", "bucoks.com",
+            "experience.arcgis.com",
+        }),
     ),
 )
 

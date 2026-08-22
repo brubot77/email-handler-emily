@@ -44,16 +44,26 @@ def infer_annual_tax_year(text: str) -> int | None:
 
 
 def _split_location(value: str) -> tuple[str, str, str, str]:
-    raw = re.sub(r"\s+", " ", value.strip())
+    raw = re.sub(r"\s+", " ", (value or "").strip()).strip(" ,")
+    if not raw:
+        return "", "", "KS", ""
+
     parts = [p.strip() for p in raw.split(",")]
     address = parts[0] if parts else ""
     city = parts[1] if len(parts) > 1 else ""
     tail = parts[2] if len(parts) > 2 else ""
     state, zip_code = "KS", ""
+
+    # County exhibits sometimes contain no situs address and literally report
+    # only "Sedgwick County, KS" (or ", Sedgwick County, KS"). Treat that as
+    # missing address rather than a usable property location.
+    if address.upper().endswith(" COUNTY") and city.upper() == "KS":
+        return "", "", "KS", ""
+
     m = re.search(r"\b([A-Z]{2})\s*(\d{5}(?:-\d{4})?)?\b", tail.upper())
     if m:
         state, zip_code = m.group(1), m.group(2) or ""
-    if address in {"", "KS"}:
+    if address.upper() in {"", "KS"}:
         address = ""
     return address, city, state, zip_code
 
@@ -69,16 +79,26 @@ def parse_foreclosure_exhibit(text: str, *, county: str, source_url: str = "") -
         tax_match = re.search(r"(?im)^\s*Tax\s+ID\s+No\.\s*[:#]?\s*([^\n]+)", block)
         tax_id = tax_match.group(1).strip() if tax_match else ""
         status = "ACTIVE"
-        if re.search(r"(?im)^\s*REDEEMED\s*$", block):
+        # PDF extraction occasionally drops the first E from REDEEMED.
+        if re.search(r"(?im)^\s*(?:REDEEMED|RDEEMED)\s*$", block):
             status = "REDEEMED"
         elif re.search(r"(?im)^\s*DROPPED\s*$", block):
             status = "DROPPED"
 
-        loc_match = re.search(r"(?im)^\s*Approximate\s+Location\s*:\s*([^\n]*)", block)
+        # Capture location through the next named field so addresses split across
+        # PDF text lines (for example "344" + "W 34TH ST S ...") are rejoined.
+        loc_match = re.search(
+            r"(?is)\bApproximate\s+Location\s*:\s*(.*?)"
+            r"(?=\s*Delinquent\s+Years\s*:|\s*Redemption\s+Amount\s*:|"
+            r"\s*Current\s+Owner|\Z)",
+            block,
+        )
         address, city, state, zip_code = _split_location(loc_match.group(1) if loc_match else "")
         years_match = re.search(r"(?im)^\s*Delinquent\s+Years\s*:\s*([^\n]+)", block)
         amount_match = re.search(r"(?im)^\s*Redemption\s+Amount\s*:\s*([^\n]+)", block)
-        owner_match = re.search(r"(?im)^\s*Current\s+Owner\(s\)\s*:\s*([^\n]+)", block)
+        owner_match = re.search(
+            r"(?i)\bCurrent\s+Owner(?:\(s\)|s)?\s*:\s*([^\n]+)", block
+        )
 
         records.append(TaxRecord(
             county=county, parcel_id=parcel_no, tax_id=tax_id, address=address, city=city,
@@ -227,7 +247,16 @@ def discover_tax_document_links(
             continue
         haystack = f"{url} {label}".lower()
         tax_match = any(token in haystack for token in ("delinquent", "foreclosure", "tax sale", "exhibit", "sheriff sale"))
-        support_match = parent_is_foreclosure and any(token in haystack for token in ("story map", "properties", "bidder", "notice"))
+        support_match = parent_is_foreclosure and any(
+            token in haystack
+            for token in (
+                "story map",
+                "property list",
+                "list of properties",
+                "notice of sale",
+                "sheriff sale",
+            )
+        )
         if not (tax_match or support_match):
             continue
         if any(token in haystack for token in ("personal property", "personal-property", "personal_tax")):

@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--max-value",type=float,default=130000)
     parser.add_argument("--verified-values-only",action="store_true")
     parser.add_argument("--dry-run",action="store_true",help="Print candidates; do not write tracker")
+    parser.add_argument("--print-limit",type=int,default=60,help="Maximum candidates to print; 0 prints all")
     args=parser.parse_args()
 
     records=[]
@@ -42,12 +43,27 @@ def main():
         parser.error("Provide --input-json, --exhibit-text, or --live-source.")
 
     candidates=build_candidates(records,min_years=args.min_years,max_value=args.max_value,include_unknown_value=not args.verified_values_only)
-    for i,c in enumerate(candidates,1):
+    counts={}
+    addressed=0
+    for c in candidates:
+        counts[c.record.county]=counts.get(c.record.county,0)+1
+        addressed += 1 if c.record.address else 0
+    county_summary=", ".join(f"{k}={v}" for k,v in sorted(counts.items()))
+    print(f"Candidate summary: total={len(candidates)}, with_street_address={addressed}" + (f", {county_summary}" if county_summary else ""))
+    shown=candidates if args.print_limit == 0 else candidates[:max(args.print_limit,0)]
+    for i,c in enumerate(shown,1):
         r=c.record
         print(f"{i:>3}. {c.score:>3} | {r.county:<9} | {r.address or '[NO ADDRESS]'} | parcel={r.parcel_id or '-'} | years={','.join(map(str,r.delinquent_years))} | {c.foreclosure_stage}")
+    if args.print_limit > 0 and len(candidates) > len(shown):
+        print(f"... {len(candidates)-len(shown)} additional candidate(s) omitted; use --print-limit 0 to show all.")
     if args.dry_run:
         print(f"Dry run: {len(candidates)} candidate(s); tracker not modified.")
         return
+    if args.live_source and not args.verified_values_only:
+        parser.error(
+            "Refusing live-source tracker write without --verified-values-only. "
+            "County appraisal/value enrichment must be completed before raw live candidates are written."
+        )
     path=write_tracker(args.tracker,candidates)
     print(f"Wrote {len(candidates)} candidate(s) to {path}")
 

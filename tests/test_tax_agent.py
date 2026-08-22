@@ -178,4 +178,59 @@ class TrackerTests(unittest.TestCase):
             self.assertEqual(refreshed["Assigned To"],"Billy")
             self.assertEqual(refreshed["Notes"],"Drive-by needed")
 
+
+class Phase3QualityTests(unittest.TestCase):
+    def test_sedgwick_multiline_location_and_county_only_placeholder(self):
+        sample = """
+Parcel No. 56
+Tax ID No. 00111458
+Legal Description: LOT 17 BLOCK 8 LOUIS' 6TH. ADD., Sedgwick County, KS Approximate Location: 344
+W 34TH ST S, WICHITA, KS 67217
+Delinquent Years: 2021-2024 Redemption Amount: $6,360.02
+Current Owners: GIFFORD WAYNE E & MARGARET A
+Parcel No. 61
+Tax ID No. 00112427
+Legal Description: LOTS 42-44 BLOCK H MONTROSE PARK ADD., Sedgwick County, KS Approximate
+Location: Sedgwick County, KS
+Delinquent Years: 2021-2024 Redemption Amount: $928.12
+Current Owners: FUNKHOUSER JERRY B SR
+"""
+        rows = parse_foreclosure_exhibit(sample, county="Sedgwick")
+        p56 = next(r for r in rows if r.parcel_id == "56")
+        p61 = next(r for r in rows if r.parcel_id == "61")
+        self.assertEqual(p56.address, "344 W 34TH ST S")
+        self.assertEqual(p56.city, "WICHITA")
+        self.assertEqual(p56.zip_code, "67217")
+        self.assertEqual(p56.owner, "GIFFORD WAYNE E & MARGARET A")
+        self.assertEqual(p61.address, "")
+        self.assertEqual(p61.city, "")
+
+    def test_sedgwick_pdf_redeemed_typo_is_resolved(self):
+        sample = """
+Parcel No. 3
+Tax ID No. 00099697
+RDEEMED
+"""
+        row = parse_foreclosure_exhibit(sample, county="Sedgwick")[0]
+        self.assertTrue(row.is_resolved)
+
+    def test_foreclosure_support_links_skip_generic_bidder_and_copyright(self):
+        html = """
+        <a href="https://experience.arcgis.com/experience/abc123">Story Map</a>
+        <a href="/Procurement/BidderRegistration.aspx">Bidder Registration</a>
+        <a href="/site/copyright">Copyright Notices</a>
+        """
+        links = discover_tax_document_links(
+            html,
+            "https://www.bucoks.gov/502/Tax-Foreclosure-Sale-Information",
+            {"www.bucoks.gov", "experience.arcgis.com"},
+            parent_is_foreclosure=True,
+        )
+        self.assertEqual(links, ["https://experience.arcgis.com/experience/abc123"])
+
+    def test_butler_source_trusts_current_story_map_host(self):
+        from app.tax_agent.sources import COUNTY_SOURCES
+        butler = next(s for s in COUNTY_SOURCES if s.county == "Butler")
+        self.assertIn("experience.arcgis.com", butler.allowed_domains)
+
 if __name__=="__main__": unittest.main()
