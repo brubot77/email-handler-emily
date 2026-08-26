@@ -9,6 +9,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
+from .butler import collect_butler_records
 from .core import build_candidates
 from .enrichment import enrich_sedgwick_records, is_clearly_nonresidential
 from .harvey_current_tax import verify_harvey_records
@@ -151,6 +152,24 @@ def main() -> None:
     )
     parser.add_argument("--max-value", type=float, default=130000)
     parser.add_argument("--min-years", type=int, default=2)
+    parser.add_argument(
+        "--butler-max-pages",
+        type=int,
+        default=0,
+        help="Limit Butler discovery pages for controlled preview; 0 = all.",
+    )
+    parser.add_argument(
+        "--butler-limit",
+        type=int,
+        default=0,
+        help="Limit Butler statements sent to exact tax verification; 0 = all.",
+    )
+    parser.add_argument(
+        "--butler-sleep",
+        type=float,
+        default=0.15,
+        help="Delay between Butler verification/appraiser requests.",
+    )
     args = parser.parse_args()
 
     sedgwick_records, source_audit = collect_live_records({"Sedgwick"})
@@ -171,7 +190,25 @@ def main() -> None:
         if r.years_delinquent >= args.min_years and not is_clearly_nonresidential(r)
     ]
 
-    records = sedgwick_records + harvey_verified
+    butler_records, butler_audit = collect_butler_records(
+        min_years=args.min_years,
+        max_value=args.max_value,
+        max_pages=args.butler_max_pages,
+        limit=args.butler_limit,
+        sleep_seconds=args.butler_sleep,
+    )
+    # Butler production scope is residential only. Do not treat unknown,
+    # vacant, agricultural, or other non-residential classifications as
+    # production candidates merely because they are not "clearly" commercial.
+    butler_verified = [
+        r for r in butler_records
+        if (
+            r.years_delinquent >= args.min_years
+            and "RESIDENTIAL" in (r.property_class or "").upper()
+        )
+    ]
+
+    records = sedgwick_records + harvey_verified + butler_verified
     candidates = build_candidates(
         records,
         min_years=args.min_years,
@@ -180,7 +217,7 @@ def main() -> None:
     )
     buckets = bucket_candidates(candidates)
 
-    print("Phase 8 Sedgwick + Harvey production preview:")
+    print("Phase 9 Sedgwick + Harvey + Butler production preview:")
     print("  Sedgwick enrichment: " + ", ".join(f"{k}={v}" for k, v in enrich_audit.items()))
     print("  Harvey publication sources:")
     for tax_year, url, count, status in harvey_source_audit:
@@ -188,6 +225,8 @@ def main() -> None:
     print("  Harvey GIS enrichment: " + ", ".join(f"{k}={v}" for k, v in harvey_enrich_audit.items()))
     print("  Harvey current-tax verification: " + ", ".join(f"{k}={v}" for k, v in harvey_verify_audit.items()))
     print(f"  Harvey verified production rows (>= {args.min_years} unpaid years): {len(harvey_verified)}")
+    print("  Butler current-tax/appraiser verification: " + ", ".join(f"{k}={v}" for k, v in butler_audit.items()))
+    print(f"  Butler verified residential production-source rows (>= {args.min_years} unpaid years): {len(butler_verified)}")
     print()
     for tab, rows in buckets.items():
         by_county = Counter(c.record.county for c in rows)
@@ -195,9 +234,28 @@ def main() -> None:
         print(f"  {tab:<24} {len(rows):>4}" + (f"  ({detail})" if detail else ""))
     print(f"  {'TOTAL':<24} {sum(len(v) for v in buckets.values()):>4}")
 
+    verification_errors = (
+        int(harvey_verify_audit.get("errors", 0))
+        + int(butler_audit.get("tax_errors", 0))
+    )
+
+    if verification_errors:
+        print()
+        print(
+            "VERIFICATION WARNING: "
+            f"{verification_errors} current-tax verification error(s) occurred. "
+            "Preview results may be incomplete."
+        )
+
     if not args.apply:
         print("Preview only: Google Sheets not accessed or modified.")
         return
+
+    if verification_errors:
+        raise RuntimeError(
+            "Refusing --apply because current-tax verification errors occurred. "
+            "Re-run after the county source is responding cleanly."
+        )
 
     drive, sheets = connect_google()
     spreadsheet_id, created, moved = find_or_create_spreadsheet(

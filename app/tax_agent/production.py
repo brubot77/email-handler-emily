@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from typing import Iterable
 
@@ -46,12 +47,20 @@ def is_improved_dwelling(record: TaxRecord) -> bool:
     ):
         return True
 
+    county = record.county.strip().lower()
+
     # Harvey GIS exposes Residential classification and building value but
     # not the detailed SFLA/bed/bath fields used by Sedgwick.
-    return (
-        record.county.strip().lower() == "harvey"
-        and "RESIDENTIAL" in text
-    )
+    if county == "harvey" and "RESIDENTIAL" in text:
+        return True
+
+    # Butler's official appraiser exposes current class and improvement value,
+    # but not the Sedgwick-style SFLA/unit fields. Require a numbered situs
+    # address so road-only / zero-address parcels do not enter Acquisition.
+    if county == "butler" and "RESIDENTIAL" in text:
+        return bool(re.match(r"^\s*\d+", record.address or ""))
+
+    return False
 
 
 def production_priority_key(candidate: TaxCandidate) -> tuple:
