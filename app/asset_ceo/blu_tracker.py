@@ -30,6 +30,8 @@ class BluTrackerReadResult:
     unmatched_rent_addresses: tuple[str, ...] = ()
     unmatched_insurance_addresses: tuple[str, ...] = ()
     ambiguous_street_addresses: tuple[str, ...] = ()
+    rent_allocation_review_addresses: tuple[str, ...] = ()
+    ignored_rent_summary_rows: tuple[str, ...] = ()
 
 
 def _header_key(value: Any) -> str:
@@ -95,6 +97,28 @@ def _get(row: list[Any], idx: dict[str, int], *names: str) -> Any:
 
 def _source_ref(spreadsheet_id: str, tab: str, row_number: int, field: str) -> str:
     return f"{spreadsheet_id}:{tab}:{row_number}:{field}"
+
+
+def _rent_summary_label(address: str) -> bool:
+    """True for non-property Rent Roll summary labels such as Total Rent."""
+    text = re.sub(r"\s+", " ", str(address or "").strip().lower())
+    return text in {"total", "total rent", "grand total", "grand total rent"}
+
+
+def _street_number_and_tail(address: str) -> tuple[int | None, str, str]:
+    """Return numeric house number, normalized street tail, and full normalized street."""
+    street = normalize_street(address)
+    parts = street.split()
+    if not parts:
+        return None, "", street
+    match = re.fullmatch(r"(\d+)", parts[0])
+    if not match:
+        return None, " ".join(parts[1:]), street
+    return int(match.group(1)), " ".join(parts[1:]), street
+
+
+def _same_tax(a: float | None, b: float | None, tolerance: float = 0.10) -> bool:
+    return a is not None and b is not None and abs(a - b) <= tolerance
 
 
 def parse_blu_tracker_rows(
@@ -257,6 +281,7 @@ def parse_blu_tracker_rows(
             "city": city,
             "state": state,
             "facts": facts,
+            "monthly_tax": monthly_tax,
         }
         street_to_keys[normalize_street(address)].append(key)
 
@@ -264,6 +289,8 @@ def parse_blu_tracker_rows(
     ambiguous_addresses: list[str] = []
     unmatched_rent: list[str] = []
     unmatched_insurance: list[str] = []
+    rent_allocation_reviews: list[str] = []
+    ignored_rent_summary_rows: list[str] = []
 
     def match_key(address: str, *, unmatched: list[str]) -> str | None:
         street = normalize_street(address)
@@ -278,8 +305,9 @@ def parse_blu_tracker_rows(
             return None
         return keys[0]
 
-    # Rent Roll has a title row, then a header row containing Property Address and
-    # a date/period heading. That period is retained as provenance/effective-at.
+    # Rent Roll can contain both property-level rent and grouped building/unit rent.
+    # We first collect exact matches, then conservatively withhold current_rent when
+    # the row appears to represent multiple Address Data properties.
     try:
         rent_header_row, rent_idx = _find_header(rent_rows, {"propertyaddress"})
     except ValueError:
@@ -289,12 +317,19 @@ def parse_blu_tracker_rows(
         rent_period = ""
         if len(rent_header) > 1:
             rent_period = str(rent_header[1] or "").strip()
-        for row_number, row in enumerate(rent_rows[rent_header_row + 1 :], start=rent_header_row + 2):
+
+        rent_candidates: list[dict[str, Any]] = []
+        for row_number, row in enumerate(
+            rent_rows[rent_header_row + 1 :], start=rent_header_row + 2
+        ):
             address = str(_get(row, rent_idx, "Property Address") or "").strip()
             if not address:
                 continue
-            # The rent amount is the first non-address cell in the row. In the
-            # current BLU Tracker it is column B beneath the period heading.
+            if _rent_summary_label(address):
+                ignored_rent_summary_rows.append(address)
+                continue
+
+            # The rent amount is the first non-address numeric cell in the row.
             addr_col = rent_idx.get("propertyaddress", 0)
             rent_value = None
             rent_col = None
@@ -308,16 +343,131 @@ def parse_blu_tracker_rows(
                     break
             if rent_value is None:
                 continue
+
             key = match_key(address, unmatched=unmatched_rent)
             if not key:
                 continue
-            field_name = rent_period or (f"Column {rent_col + 1}" if rent_col is not None else "Rent")
+            field_name = rent_period or (
+                f"Column {rent_col + 1}" if rent_col is not None else "Rent"
+            )
+            rent_candidates.append(
+                {
+                    "row_number": row_number,
+                    "address": address,
+                    "key": key,
+                    "rent_value": rent_value,
+                    "field_name": field_name,
+                }
+            )
+
+        rent_keys_present = {candidate["key"] for candidate in rent_candidates}
+
+        def grouped_siblings(key: str) -> list[str]:
+            """Find structural sibling properties whose rent may be rolled into key.
+
+            This does not use a rent/forecast ratio threshold. It only flags:
+              * same-base unit children (e.g. 116 SW 2nd + 116 SW 2nd B/C), or
+              * adjacent +/-2 house numbers on the same street with essentially
+                identical monthly tax and no separate Rent Roll row.
+
+            The rule is deliberately conservative: a false positive withholds
+            current_rent for review rather than writing a wrong property-level rent.
+            """
+            target = mutable[key]
+            target_num, target_tail, target_street = _street_number_and_tail(
+                target["address"]
+            )
+            siblings: list[str] = []
+            for other_key, other in mutable.items():
+                if other_key == key or other_key in rent_keys_present:
+                    continue
+
+                other_num, other_tail, other_street = _street_number_and_tail(
+                    other["address"]
+                )
+
+                # Same base address with child-unit suffix, e.g. "116 sw 2nd b".
+                same_base_child = (
+                    other_street.startswith(target_street + " ")
+                    or target_street.startswith(other_street + " ")
+                )
+
+                # Duplex/pair pattern seen in BLU Tracker. Equal tax is used as
+                # a structural signal; no amount/market-rent ratio is used.
+                adjacent_pair = (
+                    target_num is not None
+                    and other_num is not None
+                    and abs(target_num - other_num) == 2
+                    and target_tail == other_tail
+                    and _same_tax(target.get("monthly_tax"), other.get("monthly_tax"))
+                )
+
+                if same_base_child or adjacent_pair:
+                    siblings.append(other_key)
+
+            return sorted(
+                siblings,
+                key=lambda sibling_key: mutable[sibling_key]["address"].lower(),
+            )
+
+        for candidate in rent_candidates:
+            key = candidate["key"]
+            row_number = candidate["row_number"]
+            address = candidate["address"]
+            rent_value = candidate["rent_value"]
+            field_name = candidate["field_name"]
+            source_ref = _source_ref(
+                spreadsheet_id, "Rent Roll", row_number, field_name
+            )
+            siblings = grouped_siblings(key)
+
+            if siblings:
+                group_keys = [key, *siblings]
+                group_addresses = [
+                    mutable[group_key]["address"] for group_key in group_keys
+                ]
+                group_label = " | ".join(group_addresses)
+                rent_allocation_reviews.append(address)
+
+                # Preserve the raw grouped amount and provenance on every affected
+                # property, but do NOT promote it to current_rent.
+                for group_key in group_keys:
+                    mutable[group_key]["facts"].extend(
+                        [
+                            FactInput(
+                                "rent_allocation_status",
+                                "REVIEW_REQUIRED",
+                                "blu_tracker_rent_roll",
+                                source_ref,
+                                effective_at=rent_period or None,
+                                confidence=1.0,
+                            ),
+                            FactInput(
+                                "rent_roll_group_reported_amount",
+                                rent_value,
+                                "blu_tracker_rent_roll",
+                                source_ref,
+                                effective_at=rent_period or None,
+                                confidence=1.0,
+                            ),
+                            FactInput(
+                                "rent_allocation_group",
+                                group_label,
+                                "blu_tracker_rent_roll",
+                                source_ref,
+                                effective_at=rent_period or None,
+                                confidence=1.0,
+                            ),
+                        ]
+                    )
+                continue
+
             mutable[key]["facts"].append(
                 FactInput(
                     "current_rent",
                     rent_value,
                     "blu_tracker_rent_roll",
-                    _source_ref(spreadsheet_id, "Rent Roll", row_number, field_name),
+                    source_ref,
                     effective_at=rent_period or None,
                     confidence=1.0,
                 )
@@ -368,6 +518,8 @@ def parse_blu_tracker_rows(
         unmatched_rent_addresses=tuple(sorted(set(unmatched_rent))),
         unmatched_insurance_addresses=tuple(sorted(set(unmatched_insurance))),
         ambiguous_street_addresses=tuple(sorted(set(ambiguous_addresses))),
+        rent_allocation_review_addresses=tuple(sorted(set(rent_allocation_reviews))),
+        ignored_rent_summary_rows=tuple(sorted(set(ignored_rent_summary_rows))),
     )
 
 

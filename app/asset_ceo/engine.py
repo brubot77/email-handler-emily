@@ -50,6 +50,45 @@ class AssetCeoEngine:
         decisions: list[DecisionCandidate] = []
         period = as_of.strftime("%Y-%m")
 
+        rent_allocation_status = str(facts.get("rent_allocation_status") or "").strip().upper()
+        if rent_allocation_status == "REVIEW_REQUIRED":
+            grouped_amount = facts.get("rent_roll_group_reported_amount")
+            group_label = str(facts.get("rent_allocation_group") or "").strip()
+            try:
+                grouped_amount_num = float(grouped_amount) if grouped_amount not in (None, "") else None
+            except (TypeError, ValueError):
+                grouped_amount_num = None
+
+            amount_text = (
+                f"${grouped_amount_num:,.0f}/mo "
+                if grouped_amount_num is not None
+                else "a grouped monthly amount "
+            )
+            group_text = f" across {group_label}" if group_label else ""
+            decisions.append(
+                DecisionCandidate(
+                    decision_type="RENT_ALLOCATION_REVIEW",
+                    title="Resolve grouped rent allocation",
+                    recommendation=(
+                        f"BLU Tracker Rent Roll reports {amount_text}{group_text}. "
+                        "Do not use it as property-level current rent until the amount is allocated to the correct property/unit."
+                    ),
+                    dedupe_key=f"{prop.property_id}:RENT_ALLOCATION_REVIEW:{period}",
+                    authority_level=self.policies.authority_level,
+                    confidence=1.0,
+                    rationale="Grouped Rent Roll amounts can materially distort rent-gap, NOI, and DSCR analysis.",
+                    evidence=[{
+                        "evidence_type": "rent_allocation",
+                        "source": "blu_tracker_rent_roll",
+                        "data": {
+                            "rent_allocation_status": rent_allocation_status,
+                            "rent_roll_group_reported_amount": grouped_amount_num,
+                            "rent_allocation_group": group_label,
+                        },
+                    }],
+                )
+            )
+
         missing = [name for name in CRITICAL_FACTS if facts.get(name) in (None, "")]
         if missing:
             decisions.append(

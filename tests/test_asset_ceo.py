@@ -179,6 +179,85 @@ class AssetCeoTests(unittest.TestCase):
                 self.assertEqual(latest["current_rent"], 600.0)
                 self.assertNotIn("loan_balance", latest)
 
+    def test_grouped_rent_pair_is_withheld_from_current_rent(self):
+        address_rows = [
+            [
+                "Address", "City", "ST", "LLC", "Doors", "Deal Name", "Refi Group",
+                "Purchase Date", " Purchase Price ", " Monthly Tax ", " Orig. Appr. ",
+                " Ori. Loan Amt. ", "Insurance Value", " Forecast Rent ", "Mortgage Pmt",
+            ],
+            [
+                "1248 N Volutsia", "Wichita", "KS", "BLU1", "1", "Lighthouse", "Lighthouse",
+                "03-Dec-2024", "", "$76.20", "$75,000", "$49,517.05", "$64.59",
+                "$742.50", "$332.12",
+            ],
+            [
+                "1250 N Volutsia", "Wichita", "KS", "BLU1", "1", "Lighthouse", "Lighthouse",
+                "03-Dec-2024", "", "$76.17", "$75,000", "$49,517.05", "$0.00",
+                "$742.50", "$332.12",
+            ],
+        ]
+        rent_rows = [
+            ["", "Rent Roll"],
+            ["Property Address", "2026-05-13 thru 2026-06-12"],
+            ["1248 N Volutsia", "$2,024.00"],
+        ]
+        insurance_rows = [
+            ["LLC", "Policy / Section", "Property Address", "Monthly Premium", "Annual Premium", "Coverage"],
+            ["BLU1", "Property", "1248-1250 N Volutsia", "$64.59", "$775.00", "$99,100"],
+        ]
+
+        parsed = parse_blu_tracker_rows(
+            address_rows, rent_rows, insurance_rows, spreadsheet_id="test-sheet"
+        )
+        by_address = {record.address: record for record in parsed.records}
+
+        for address in ("1248 N Volutsia", "1250 N Volutsia"):
+            facts = {fact.fact_name: fact.value for fact in by_address[address].facts}
+            self.assertNotIn("current_rent", facts)
+            self.assertEqual(facts["rent_allocation_status"], "REVIEW_REQUIRED")
+            self.assertEqual(facts["rent_roll_group_reported_amount"], 2024.0)
+            self.assertIn("1248 N Volutsia", facts["rent_allocation_group"])
+            self.assertIn("1250 N Volutsia", facts["rent_allocation_group"])
+
+        self.assertEqual(parsed.rent_allocation_review_addresses, ("1248 N Volutsia",))
+        self.assertEqual(parsed.unmatched_insurance_addresses, ("1248-1250 N Volutsia",))
+
+    def test_rent_roll_total_is_ignored_not_unmatched(self):
+        address_rows, rent_rows, insurance_rows = self._blu_tracker_fixture()
+        rent_rows.append(["Total Rent", "$29,284.00"])
+
+        parsed = parse_blu_tracker_rows(
+            address_rows, rent_rows, insurance_rows, spreadsheet_id="test-sheet"
+        )
+
+        self.assertEqual(parsed.unmatched_rent_addresses, ())
+        self.assertEqual(parsed.ignored_rent_summary_rows, ("Total Rent",))
+
+    def test_shadow_engine_creates_rent_allocation_review(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "asset.db"
+            with AssetCeoStore(db) as store:
+                store.initialize_schema()
+                prop = store.upsert_property(
+                    canonical_key="1248 n volutsia|wichita|ks",
+                    address="1248 N Volutsia",
+                    city="Wichita",
+                    state="KS",
+                )
+                facts = {
+                    "market_rent": 742.50,
+                    "estimated_value": 75000,
+                    "rent_allocation_status": "REVIEW_REQUIRED",
+                    "rent_roll_group_reported_amount": 2024,
+                    "rent_allocation_group": "1248 N Volutsia | 1250 N Volutsia",
+                }
+                _, decisions = AssetCeoEngine().evaluate(
+                    prop, facts, as_of=date(2026, 8, 30)
+                )
+                kinds = {decision.decision_type for decision in decisions}
+                self.assertIn("RENT_ALLOCATION_REVIEW", kinds)
+
 
 if __name__ == "__main__":
     unittest.main()

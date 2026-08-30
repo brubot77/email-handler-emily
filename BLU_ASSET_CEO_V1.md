@@ -31,12 +31,29 @@ The following mappings are intentional BLU policy:
 | `doors` | `Address Data` → Doors |
 | `deal_name` | `Address Data` → Deal Name |
 | `refi_group` | `Address Data` → Refi Group |
-| `current_rent` | `Rent Roll` → current period rent |
+| `current_rent` | `Rent Roll` → current period rent **only when the row is safely property-level** |
 | `annual_insurance` | `Insurance Data` → Annual Premium |
 
 `Orig. Loan Amt.` is deliberately stored as `original_loan_amount`, **not** `loan_balance`. A later lender/Morgan refinance source should provide current loan balance.
 
 Operly values are not used as `market_rent` or `estimated_value` in v1.1.
+
+## Grouped Rent Roll guardrail (v1.1.1)
+
+BLU Tracker sometimes reports one Rent Roll amount for multiple Address Data properties (for example duplex/unit pairs). v1.1.1 does **not** use a rent-to-forecast threshold to guess this.
+
+Instead, the connector conservatively withholds `current_rent` when a Rent Roll row has a structural sibling in Address Data with no separate Rent Roll row:
+
+- same-base unit children, such as a base address plus B/C units; or
+- adjacent +/-2 house numbers on the same street with essentially identical monthly tax.
+
+For affected properties, Asset CEO records:
+
+- `rent_allocation_status = REVIEW_REQUIRED`
+- `rent_roll_group_reported_amount`
+- `rent_allocation_group`
+
+and creates an `OBSERVE`-only `RENT_ALLOCATION_REVIEW` decision. Summary labels such as `Total Rent` are ignored rather than treated as unmatched addresses. Typos and combined insurance rows remain unmatched for explicit review; no fuzzy allocation is performed.
 
 ## Expense completeness guardrail
 

@@ -25,6 +25,8 @@ class RunResult:
     blu_tracker_matched: int = 0
     blu_tracker_missing: int = 0
     blu_tracker_unmatched_source_rows: int = 0
+    blu_tracker_rent_allocation_reviews: int = 0
+    blu_tracker_ignored_summary_rows: int = 0
     evaluated: int = 0
     decisions_created: int = 0
     decisions_previewed: int = 0
@@ -35,12 +37,20 @@ class RunResult:
             f"Synced properties: {self.synced}",
             f"New facts: {self.facts_inserted}",
         ]
-        if self.blu_tracker_matched or self.blu_tracker_missing or self.blu_tracker_unmatched_source_rows:
+        if (
+            self.blu_tracker_matched
+            or self.blu_tracker_missing
+            or self.blu_tracker_unmatched_source_rows
+            or self.blu_tracker_rent_allocation_reviews
+            or self.blu_tracker_ignored_summary_rows
+        ):
             lines.extend(
                 [
                     f"BLU Tracker matched properties: {self.blu_tracker_matched}",
                     f"Property Brain properties without BLU Tracker match: {self.blu_tracker_missing}",
                     f"Unmatched/ambiguous BLU Tracker detail rows: {self.blu_tracker_unmatched_source_rows}",
+                    f"Rent allocation reviews: {self.blu_tracker_rent_allocation_reviews}",
+                    f"Ignored Rent Roll summary rows: {self.blu_tracker_ignored_summary_rows}",
                 ]
             )
         lines.extend(
@@ -92,10 +102,24 @@ def run_once(
             print(f"DRY RUN: unmatched Rent Roll addresses: {len(tracker.unmatched_rent_addresses)}")
             print(f"DRY RUN: unmatched Insurance Data addresses: {len(tracker.unmatched_insurance_addresses)}")
             print(f"DRY RUN: ambiguous detail addresses: {len(tracker.ambiguous_street_addresses)}")
+            print(
+                "DRY RUN: grouped rent rows requiring allocation review: "
+                f"{len(tracker.rent_allocation_review_addresses)}"
+            )
+            print(
+                "DRY RUN: ignored Rent Roll summary rows: "
+                f"{len(tracker.ignored_rent_summary_rows)}"
+            )
             result.blu_tracker_unmatched_source_rows = (
                 len(tracker.unmatched_rent_addresses)
                 + len(tracker.unmatched_insurance_addresses)
                 + len(tracker.ambiguous_street_addresses)
+            )
+            result.blu_tracker_rent_allocation_reviews = len(
+                tracker.rent_allocation_review_addresses
+            )
+            result.blu_tracker_ignored_summary_rows = len(
+                tracker.ignored_rent_summary_rows
             )
         return result
 
@@ -122,12 +146,23 @@ def run_once(
                     + len(tracker.unmatched_insurance_addresses)
                     + len(tracker.ambiguous_street_addresses)
                 )
+                result.blu_tracker_rent_allocation_reviews = len(
+                    tracker.rent_allocation_review_addresses
+                )
+                result.blu_tracker_ignored_summary_rows = len(
+                    tracker.ignored_rent_summary_rows
+                )
                 if tracker.unmatched_rent_addresses:
                     log.warning("BLU Tracker unmatched Rent Roll addresses: %s", ", ".join(tracker.unmatched_rent_addresses))
                 if tracker.unmatched_insurance_addresses:
                     log.warning(
                         "BLU Tracker unmatched Insurance Data addresses: %s",
                         ", ".join(tracker.unmatched_insurance_addresses),
+                    )
+                if tracker.rent_allocation_review_addresses:
+                    log.warning(
+                        "BLU Tracker grouped Rent Roll rows withheld from current_rent pending allocation review: %s",
+                        ", ".join(tracker.rent_allocation_review_addresses),
                     )
                 if tracker.ambiguous_street_addresses:
                     log.warning(
@@ -150,6 +185,12 @@ def run_once(
                 len(tracker.unmatched_rent_addresses)
                 + len(tracker.unmatched_insurance_addresses)
                 + len(tracker.ambiguous_street_addresses)
+            )
+            result.blu_tracker_rent_allocation_reviews = len(
+                tracker.rent_allocation_review_addresses
+            )
+            result.blu_tracker_ignored_summary_rows = len(
+                tracker.ignored_rent_summary_rows
             )
             print(
                 "DRY RUN: BLU Tracker would match "
