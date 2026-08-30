@@ -2,7 +2,7 @@
 Description=Run BLU Asset CEO v1 daily
 
 [Timer]
-OnCalendar=*-*-* 05:30:00
+OnCalendar=*-*-* 05:30:00 America/Chicago
 Persistent=true
 RandomizedDelaySec=300
 
