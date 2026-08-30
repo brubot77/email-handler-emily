@@ -62,6 +62,29 @@ def handle_morgan_request(
     gmail.mark_processed_and_archive(message_id, processed_label_id)
     return True
 
+def trigger_monthly_analyzer() -> int:
+    cmd = (
+        "cd /home/brubot77/Monthly-Analyzer "
+        "&& ./run_if_new.sh"
+    )
+
+    result = subprocess.run(
+        ["bash", "-lc", cmd],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.stdout:
+        print(result.stdout)
+
+    if result.stderr:
+        print(result.stderr)
+
+    print(f"Monthly Analyzer exit code: {result.returncode}")
+
+    return result.returncode
+
+
 def trigger_deal_analyzer():
     cmd = (
         "cd /home/brubot77/.openclaw/workspace/shannon "
@@ -646,6 +669,21 @@ def handle_historian_request(
 
     message_id = message["id"]
 
+    print(
+        f"{message_id}: historian retrieval received "
+        "-> running Monthly Analyzer first"
+    )
+
+    monthly_rc = trigger_monthly_analyzer()
+
+    if monthly_rc != 0:
+        print(
+            f"{message_id}: Monthly Analyzer failed "
+            "-> refusing to send stale historian"
+        )
+        gmail.mark_failed(message_id, failed_label_id)
+        return True
+
     historian_path = MONTHLY_OUTPUT_DIR / historian_file
 
     if not historian_path.exists():
@@ -924,6 +962,30 @@ def main():
             settings.deal_input_dir,
             settings.unmatched_dir,
         )
+
+        monthly_saved_paths = [
+            path
+            for path in saved_paths
+            if Path(path).parent == Path(settings.monthly_input_dir)
+        ]
+
+        if monthly_saved_paths:
+            print(
+                f"{message_id}: monthly statement PDF(s) saved "
+                "-> running Monthly Analyzer"
+            )
+
+            monthly_rc = trigger_monthly_analyzer()
+
+            if monthly_rc != 0:
+                print(
+                    f"{message_id}: Monthly Analyzer failed "
+                    "after monthly statement email"
+                )
+                gmail.mark_failed(message_id, failed_label_id)
+                processed_ids.add(message_id)
+                state.save(processed_ids)
+                continue
 
         for path in saved_paths:
             if path.startswith(DEAL_DIR):
