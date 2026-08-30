@@ -1,5 +1,5 @@
 [Unit]
-Description=BLU Asset CEO v1 shadow-mode evaluation
+Description=BLU Asset CEO v1.1 shadow-mode evaluation
 After=network-online.target
 
 [Service]
@@ -7,4 +7,4 @@ Type=oneshot
 User=brubot77
 WorkingDirectory=/home/brubot77/email-handler-emily
 EnvironmentFile=/home/brubot77/email-handler-emily/.env
-ExecStart=/home/brubot77/email-handler-emily/venv/bin/python -m app.asset_ceo_runner --sync-morgan --limit 10
+ExecStart=/home/brubot77/email-handler-emily/venv/bin/python -m app.asset_ceo_runner --sync-morgan --sync-blu-tracker --limit 10

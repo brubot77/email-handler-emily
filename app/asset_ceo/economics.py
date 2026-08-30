@@ -12,6 +12,10 @@ def _num(value):
         return None
 
 
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "complete"}
+
+
 @dataclass(frozen=True)
 class EconomicSnapshot:
     annual_scheduled_rent: float | None = None
@@ -73,8 +77,13 @@ def calculate_snapshot(facts: dict[str, object]) -> EconomicSnapshot:
     if annual_effective_revenue is None and annual_scheduled_rent is not None:
         annual_effective_revenue = annual_scheduled_rent * (1.0 - max(0.0, vacancy_rate)) + other_income
 
+    # Do not silently treat missing operating-expense categories as zero. BLU
+    # Tracker v1.1 initially supplies taxes and insurance, but not a complete
+    # maintenance/PM/utilities/other expense picture. Partial expenses must not
+    # create false NOI or DSCR precision. Aggregate components only when an
+    # upstream source explicitly marks them complete.
     annual_operating_expenses = _num(facts.get("annual_operating_expenses"))
-    if annual_operating_expenses is None:
+    if annual_operating_expenses is None and _truthy(facts.get("operating_expenses_complete")):
         expense_parts = [
             _num(facts.get("maintenance_t12")),
             _num(facts.get("annual_property_taxes")),
@@ -83,8 +92,7 @@ def calculate_snapshot(facts: dict[str, object]) -> EconomicSnapshot:
             _num(facts.get("annual_utilities")),
             _num(facts.get("annual_other_operating_expenses")),
         ]
-        if any(v is not None for v in expense_parts):
-            annual_operating_expenses = sum(v or 0.0 for v in expense_parts)
+        annual_operating_expenses = sum(v or 0.0 for v in expense_parts)
 
     annual_noi = _num(facts.get("annual_noi"))
     if annual_noi is None and annual_effective_revenue is not None and annual_operating_expenses is not None:

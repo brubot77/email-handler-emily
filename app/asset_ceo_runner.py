@@ -10,11 +10,16 @@ from app.asset_ceo.runner import run_once
 def main() -> int:
     parser = argparse.ArgumentParser(description="BLU Asset CEO v1 — Property Brain + shadow-mode decisions")
     parser.add_argument("--sync-morgan", action="store_true", help="Sync owned-property identities from Morgan Property Master")
+    parser.add_argument(
+        "--sync-blu-tracker",
+        action="store_true",
+        help="Read BLU Tracker and attach operating/financial facts to existing Property Brain properties",
+    )
     parser.add_argument("--no-evaluate", action="store_true", help="Sync only; skip metric/decision evaluation")
     parser.add_argument("--dry-run", action="store_true", help="Read/preview only; make no DB mutations")
     parser.add_argument("--db", default=None, help="Override ASSET_CEO_DB_PATH")
     parser.add_argument("--address", default=None, help="Only consider properties whose display address contains this text")
-    parser.add_argument("--limit", type=int, default=None, help="Maximum properties to sync/evaluate")
+    parser.add_argument("--limit", type=int, default=None, help="Maximum Property Brain properties to sync/evaluate")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
@@ -25,6 +30,7 @@ def main() -> int:
 
     result = run_once(
         sync_morgan=args.sync_morgan,
+        sync_blu_tracker=args.sync_blu_tracker,
         evaluate=not args.no_evaluate,
         dry_run=args.dry_run,
         db_path=args.db,

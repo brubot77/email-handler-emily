@@ -1,46 +1,81 @@
-# BLU Asset CEO v1 — Property Brain + Shadow Mode
+# BLU Asset CEO v1.1 — Property Brain + BLU Tracker Connector
 
 ## Purpose
 
-BLU Asset CEO gives every owned property a persistent digital owner/operator. Phase 1 is intentionally non-autonomous and does not require OpenAI API calls. The database owns the property truth; the engine computes auditable economics and creates shadow-mode decisions.
+BLU Asset CEO gives every owned property a persistent digital owner/operator. Phase 1 remains intentionally non-autonomous and does not require OpenAI API calls. The database owns the property truth; deterministic code computes auditable economics and creates shadow-mode decisions.
 
 ## Existing BLU integrations
 
-- **Morgan Property Master**: source of owned-property identity and ownership entity.
-- **BLU Appraisal Agent**: Asset CEO uses a behavior-compatible canonical address routine that preserves N/S/E/W directionals; this should later be refactored into one shared utility. A later source adapter will ingest latest value/rent forecasts.
+- **Morgan Property Master**: authoritative source of owned-property identity and ownership entity.
+- **BLU Tracker**: read-only source of selected operating and financial facts.
+- **BLU Appraisal Agent / Operly**: supplemental market research only for now; they do **not** override the BLU Tracker facts designated below.
 - **Harvey / Tax Agent**: later source adapter for tax facts/events.
 - **Shannon**: remains acquisition underwriting; later receives actual operating feedback from Asset CEO.
 - **Emily**: remains communication/orchestration interface; later exposes Asset CEO summaries and approvals.
 
-## New package
+## BLU Tracker source-of-truth mappings
 
-- `app/asset_ceo/store.py`: SQLite Property Brain / Decision Ledger repository.
-- `app/asset_ceo/economics.py`: deterministic NOI, DSCR, cash-flow, equity, ROE, rent-gap calculations.
-- `app/asset_ceo/engine.py`: shadow policies and recommendations.
-- `app/asset_ceo/sources.py`: Morgan identity adapter.
-- `app/asset_ceo_runner.py`: VPS command-line entry point.
+The following mappings are intentional BLU policy:
 
-## Database
+| Property Brain fact | BLU Tracker source |
+|---|---|
+| `market_rent` | `Address Data` → **Forecast Rent** |
+| `estimated_value` | `Address Data` → **Orig. Appr.** |
+| `monthly_debt_service` | `Address Data` → Mortgage Pmt |
+| `annual_debt_service` | Mortgage Pmt × 12 |
+| `monthly_property_taxes` | `Address Data` → Monthly Tax |
+| `annual_property_taxes` | Monthly Tax × 12 |
+| `original_loan_amount` | `Address Data` → Orig. Loan Amt. |
+| `purchase_date` | `Address Data` → Purchase Date |
+| `purchase_price` | `Address Data` → Purchase Price, when present |
+| `doors` | `Address Data` → Doors |
+| `deal_name` | `Address Data` → Deal Name |
+| `refi_group` | `Address Data` → Refi Group |
+| `current_rent` | `Rent Roll` → current period rent |
+| `annual_insurance` | `Insurance Data` → Annual Premium |
 
-Default: `/home/brubot77/email-handler-emily/state/asset_ceo.db`
+`Orig. Loan Amt.` is deliberately stored as `original_loan_amount`, **not** `loan_balance`. A later lender/Morgan refinance source should provide current loan balance.
 
-Set explicitly if desired:
+Operly values are not used as `market_rent` or `estimated_value` in v1.1.
 
-`ASSET_CEO_DB_PATH=/home/brubot77/email-handler-emily/state/asset_ceo.db`
+## Expense completeness guardrail
+
+Taxes and insurance alone are not a complete operating-expense picture. Asset CEO v1.1 will not calculate NOI or DSCR from a partial expense set. NOI/DSCR require either:
+
+- an explicit `annual_operating_expenses` fact, or
+- `operating_expenses_complete=true` plus the component expense facts.
+
+This prevents false precision while maintenance, PM fees, utilities, and other operating expenses are still being connected.
+
+## New/updated package files
+
+- `app/asset_ceo/blu_tracker.py`: read-only BLU Tracker parser, matcher, and fact sync.
+- `app/asset_ceo/runner.py`: optional Morgan + BLU Tracker sync orchestration.
+- `app/asset_ceo/economics.py`: expense-completeness guardrail.
+- `app/asset_ceo_runner.py`: adds `--sync-blu-tracker`.
+- `tests/test_asset_ceo.py`: BLU Tracker mapping/idempotency and partial-expense tests.
+
+## Spreadsheet configuration
+
+Default BLU Tracker spreadsheet ID:
+
+`1zu9J1kDfX_y0bt_JE1-R_kEhQlqOEZt58cLq6AMrznw`
+
+Optional override:
+
+`BLU_TRACKER_SPREADSHEET_ID=<native Google Sheet ID>`
+
+The connector is read-only. It uses the existing `GMAIL_TOKEN_PATH` OAuth token and does not update BLU Tracker.
 
 ## Pilot commands
 
-Read Morgan and preview the first 10 owned properties without any mutation:
+Read both sources without creating a database:
 
-`./venv/bin/python -m app.asset_ceo_runner --sync-morgan --limit 10 --dry-run`
+`./venv/bin/python -m app.asset_ceo_runner --sync-morgan --sync-blu-tracker --limit 10 --dry-run --db /tmp/nonexistent_asset_ceo.db`
 
-Initialize/sync the first 10 properties and create shadow decisions:
+Populate a disposable 10-property Property Brain:
 
-`./venv/bin/python -m app.asset_ceo_runner --sync-morgan --limit 10`
-
-Run one property only:
-
-`./venv/bin/python -m app.asset_ceo_runner --sync-morgan --address "2607 Poplar"`
+`./venv/bin/python -m app.asset_ceo_runner --sync-morgan --sync-blu-tracker --limit 10 --db /tmp/blu_asset_ceo_v1_1.db`
 
 Run tests:
 
@@ -48,28 +83,16 @@ Run tests:
 
 ## Phase-1 authority
 
-Every decision is `OBSERVE`. No resident message, vendor scheduling, payment, rent change, collection, lease action, eviction action, refinance, purchase, or sale can be executed by Asset CEO v1.
-
-## Initial shadow policies
-
-- Rent review: current rent gap >= $50/month and >=5%, with lease ending within 120 days.
-- DSCR alert: below 1.20.
-- Maintenance review: T12 maintenance >10% of scheduled rent.
-- Work-order escalation: oldest unresolved work order >3 days.
-- Data completeness: identify missing facts needed for economic optimization.
+Every decision remains `OBSERVE`. No resident message, vendor scheduling, payment, rent change, collection, lease action, eviction action, refinance, purchase, or sale can be executed by Asset CEO v1.1.
 
 ## Next data connectors
 
-The Property Brain becomes economically useful when these facts are loaded from BLU Tracker / PM systems:
+Highest-value remaining facts:
 
-- current rent and lease end date
-- collected rent / vacancy
-- maintenance T12
-- property taxes
-- insurance
-- PM fees and other operating expenses
-- loan balance and debt service
-- market rent and estimated value
+- lease end date
+- current loan balance
+- complete operating expenses / maintenance T12 / PM fees
+- vacancy/collections
 - oldest unresolved work order age
 
-Then the Asset CEO can rank verified NOI opportunities and risks by property.
+Once those are available, Asset CEO can calculate reliable NOI/DSCR/ROE and rank verified opportunities and risks by property.

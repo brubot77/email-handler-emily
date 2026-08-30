@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from app.asset_ceo.addressing import canonical_property_key
+from app.asset_ceo.blu_tracker import parse_blu_tracker_rows, sync_blu_tracker_facts
 from app.asset_ceo.economics import calculate_snapshot
 from app.asset_ceo.engine import AssetCeoEngine
 from app.asset_ceo.models import DecisionCandidate, FactInput
@@ -40,6 +41,18 @@ class AssetCeoTests(unittest.TestCase):
         self.assertAlmostEqual(snap.monthly_rent_gap, 100)
         self.assertAlmostEqual(snap.rent_capture_pct, 1500 / 1600)
         self.assertAlmostEqual(snap.maintenance_pct_of_rent, 0.10)
+
+    def test_partial_expenses_do_not_create_false_noi_or_dscr(self):
+        snap = calculate_snapshot({
+            "current_rent": 1000,
+            "annual_property_taxes": 1200,
+            "annual_insurance": 800,
+            "monthly_debt_service": 500,
+        })
+        self.assertIsNone(snap.annual_operating_expenses)
+        self.assertIsNone(snap.annual_noi)
+        self.assertIsNone(snap.dscr)
+        self.assertAlmostEqual(snap.annual_debt_service, 6000)
 
     def test_sync_is_idempotent_and_facts_append_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -90,6 +103,81 @@ class AssetCeoTests(unittest.TestCase):
                 _, decisions = AssetCeoEngine().evaluate(prop, facts, as_of=date(2026, 8, 30))
                 kinds = {d.decision_type for d in decisions}
                 self.assertIn("RENT_REVIEW", kinds)
+
+    @staticmethod
+    def _blu_tracker_fixture():
+        address_rows = [
+            [
+                "Address", "City", "ST", "LLC", "Doors", "Deal Name", "Refi Group",
+                "Purchase Date", " Purchase Price ", " Monthly Tax ", " Orig. Appr. ",
+                " Ori. Loan Amt. ", "Insurance Value", " Forecast Rent ", "Mortgage Pmt",
+            ],
+            [
+                "1012 n green", "Wichita", "KS", "BLU1", "1", "Lighthouse", "Lighthouse",
+                "03-Dec-2024", "", "$25.55", "$40,000.00", "$26,409.09", "$26.17",
+                "$625.00", "$279.57",
+            ],
+        ]
+        rent_rows = [
+            ["", "Rent Roll"],
+            ["Property Address", "2026-05-13 thru 2026-06-12"],
+            ["1012 N Green St", "$600.00"],
+        ]
+        insurance_rows = [
+            ["LLC", "Policy / Section", "Property Address", "Monthly Premium", "Annual Premium", "Coverage"],
+            ["BLU1", "Property", "1012 N Green St", "$26.17", "$314.00", "$26,500"],
+        ]
+        return address_rows, rent_rows, insurance_rows
+
+    def test_blu_tracker_mapping_uses_forecast_rent_and_orig_appraisal(self):
+        address_rows, rent_rows, insurance_rows = self._blu_tracker_fixture()
+        parsed = parse_blu_tracker_rows(
+            address_rows, rent_rows, insurance_rows, spreadsheet_id="test-sheet"
+        )
+        self.assertEqual(len(parsed.records), 1)
+        record = parsed.records[0]
+        facts = {fact.fact_name: fact.value for fact in record.facts}
+
+        # Explicit BLU policy: these two fields come from Address Data, not Operly.
+        self.assertEqual(facts["market_rent"], 625.0)
+        self.assertEqual(facts["estimated_value"], 40000.0)
+
+        self.assertEqual(facts["current_rent"], 600.0)
+        self.assertAlmostEqual(facts["annual_debt_service"], 279.57 * 12)
+        self.assertAlmostEqual(facts["annual_property_taxes"], 25.55 * 12)
+        self.assertEqual(facts["annual_insurance"], 314.0)
+        self.assertEqual(facts["original_loan_amount"], 26409.09)
+        self.assertNotIn("loan_balance", facts)
+        self.assertEqual(parsed.unmatched_rent_addresses, ())
+        self.assertEqual(parsed.unmatched_insurance_addresses, ())
+
+    def test_blu_tracker_sync_is_idempotent(self):
+        address_rows, rent_rows, insurance_rows = self._blu_tracker_fixture()
+        parsed = parse_blu_tracker_rows(address_rows, rent_rows, insurance_rows, spreadsheet_id="test-sheet")
+
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "asset.db"
+            with AssetCeoStore(db) as store:
+                store.initialize_schema()
+                prop = store.upsert_property(
+                    canonical_key=canonical_property_key("1012 N Green St", "Wichita", "KS"),
+                    address="1012 N Green St",
+                    city="Wichita",
+                    state="KS",
+                    llc="BLU1",
+                )
+                first = sync_blu_tracker_facts(store, parsed.records)
+                second = sync_blu_tracker_facts(store, parsed.records)
+
+                self.assertEqual(first["properties_matched"], 1)
+                self.assertGreater(first["facts_inserted"], 0)
+                self.assertEqual(second["facts_inserted"], 0)
+
+                latest = store.latest_facts(prop.property_id)
+                self.assertEqual(latest["market_rent"], 625.0)
+                self.assertEqual(latest["estimated_value"], 40000.0)
+                self.assertEqual(latest["current_rent"], 600.0)
+                self.assertNotIn("loan_balance", latest)
 
 
 if __name__ == "__main__":
